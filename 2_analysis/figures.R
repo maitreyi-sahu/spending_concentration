@@ -18,8 +18,8 @@ ensure_dir(save_dir)
 iso_years <- c(2000, 2022) # update. max value dictates max of the timetrend range plotted
 
 # MEPS PATHS
-denoms_path <- paste0(data_dir, 'meps_denoms')
-meps_data_path <- paste0(data_dir, 'meps')
+denoms_path <- paste0(data_dir, 'raw/meps_denoms')
+meps_data_path <- paste0(data_dir, 'raw/meps')
 
 # --------------------------------
 #  LOAD SAMPLE DENOMS AND PROCESSED DATA - takes 2.5 minutes to load and process all data

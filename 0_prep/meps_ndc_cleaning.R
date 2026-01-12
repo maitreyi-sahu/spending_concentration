@@ -2,13 +2,14 @@
 # MEPS NDC CLEANING
 #
 # Problem -- ndcs missing for 21.66% of spending -- Haley to try to keep RXNAME
+# TODO create cleaned NDC file
 #
 # ==============================================================================
 
 source('init.R')
 
 # Load in MEPS data, which has NDC codes only
-dt <- open_dataset(paste0(data_dir, "meps/USA_MEPS_RX.parquet")) |>
+dt <- open_dataset(paste0(data_dir, "raw/meps/USA_MEPS_RX.parquet")) |>
   filter(toc == 'RX' & year_id >= 2000) |>
   select(year_id, ndc, tot_pay_amt) |>
   as.data.table() |>
@@ -78,9 +79,12 @@ quality_summary <- dt[,
     pct_spend = round(
       sum(tot_pay_amt, na.rm = TRUE) / sum(dt$tot_pay_amt, na.rm = TRUE) * 100,
       2
-    ),
-    mean_spend = round(mean(tot_pay_amt, na.rm = TRUE), 2),
+    )
   ),
   by = ndc_quality_flag
 ][order(-total_spend)]
 print(quality_summary)
+
+# ==============================================================================
+# CREATE MEPS NDC map -- save in the processed dir
+# ==============================================================================
