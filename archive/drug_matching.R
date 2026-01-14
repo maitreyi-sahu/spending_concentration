@@ -14,7 +14,7 @@ library(jsonlite)
 # -------------------------------------------------------------------
 
 # Load in MEPS data, which has NDC codes only
-meps <- open_dataset(paste0(data_dir, "meps/USA_MEPS_RX.parquet")) %>%
+meps <- open_dataset(paste0(data_dir, "raw/meps/USA_MEPS_RX.parquet")) %>%
   filter(toc == 'RX' & year_id >= 2000) |>
   as.data.table() %>%
   collect()

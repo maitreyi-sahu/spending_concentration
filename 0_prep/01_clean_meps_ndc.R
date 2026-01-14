@@ -10,7 +10,7 @@ source('init.R')
 
 # Load in MEPS data, which has NDC codes only
 dt <- open_dataset(paste0(data_dir, "raw/meps/USA_MEPS_RX.parquet")) |>
-  filter(toc == 'RX' & year_id >= 2000) |>
+  filter(toc == 'RX' & year_id >= START_YEAR) |>
   select(year_id, ndc, tot_pay_amt) |>
   as.data.table() |>
   collect()

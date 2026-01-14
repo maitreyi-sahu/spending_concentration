@@ -4,6 +4,11 @@ local = T
 # Avoid scientific notation in all printed/saved outputs
 options(scipen = 999)
 
+# ---------------------- ARGUMENTS -------------------------------
+
+START_YEAR = 2000
+END_YEAR = 2023
+
 # -------------------- DIRECTORIES -------------------------------
 
 dir_head <- if (Sys.info()[["sysname"]] == "Darwin") "/Users/" else "C:/Users/"
