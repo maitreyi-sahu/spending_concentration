@@ -88,3 +88,37 @@ print(quality_summary)
 # ==============================================================================
 # CREATE MEPS NDC map -- save in the processed dir
 # ==============================================================================
+
+# Create NDC lookup with unique NDCs and their quality flags
+ndc_lookup <- dt[,
+  .(
+    n_claims = .N,
+    total_spend = sum(tot_pay_amt, na.rm = TRUE),
+    ndc_quality_flag = first(ndc_quality_flag),
+    was_modified = first(was_modified),
+    suspicious_leading_zeros = first(suspicious_leading_zeros)
+  ),
+  by = .(ndc_original = ndc, ndc_clean)
+]
+
+# Before saving ndc_lookup, ensure character type:
+ndc_lookup[, ndc_original := as.character(ndc_original)]
+ndc_lookup[, ndc_clean := as.character(ndc_clean)]
+
+# Save the lookup
+fwrite(ndc_lookup, paste0(data_dir, "processed/meps_cleaned/ndc_lookup.csv"))
+
+# Save cleaned MEPS prescription data
+# Keep only essential columns for matching
+meps_prescriptions_clean <- dt[, .(
+  year_id,
+  ndc_original = ndc,
+  ndc_clean,
+  ndc_quality_flag,
+  tot_pay_amt
+)]
+
+saveRDS(
+  meps_prescriptions_clean,
+  paste0(data_dir, "processed/meps_cleaned/meps_prescriptions_clean.rds")
+)
