@@ -98,7 +98,7 @@ ndc_lookup <- dt[,
     was_modified = first(was_modified),
     suspicious_leading_zeros = first(suspicious_leading_zeros)
   ),
-  by = .(ndc_original = ndc, ndc_clean)
+  by = .(year_id, ndc_original = ndc, ndc_clean)
 ]
 
 # Before saving ndc_lookup, ensure character type:

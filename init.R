@@ -33,7 +33,9 @@ pacman::p_load(
   readxl,
   openxlsx,
   arrow,
+  haven,
   dplyr,
+  stringr,
   ggplot2,
   RColorBrewer,
   gridExtra
