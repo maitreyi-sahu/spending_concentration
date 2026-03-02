@@ -29,6 +29,7 @@ plot_dir <- paste0(dir, 'plots/')
 # ---------------------- PACKAGES -------------------------------
 
 pacman::p_load(
+  haven,
   data.table,
   readxl,
   openxlsx,
@@ -36,6 +37,7 @@ pacman::p_load(
   haven,
   dplyr,
   stringr,
+  stringdist,
   ggplot2,
   RColorBrewer,
   gridExtra
