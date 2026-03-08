@@ -6,7 +6,7 @@ options(scipen = 999)
 
 # ---------------------- ARGUMENTS -------------------------------
 
-START_YEAR = 2000
+START_YEAR = 2008
 END_YEAR = 2023
 
 # -------------------- DIRECTORIES -------------------------------
@@ -40,7 +40,8 @@ pacman::p_load(
   stringdist,
   ggplot2,
   RColorBrewer,
-  gridExtra
+  gridExtra,
+  zoo
 )
 
 # ----------------- HELPER FUNCTIONS ----------------------------

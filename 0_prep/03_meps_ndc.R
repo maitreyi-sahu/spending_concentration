@@ -356,6 +356,7 @@ meps_merged[,
   is_device := grepl(device_pattern, text_match_name, ignore.case = TRUE)
 ]
 
+
 # ==============================================================================
 # STEP 5.9: UPDATE FINAL STATUS (PRIORITIZE FLAGS)
 # ==============================================================================
@@ -376,6 +377,30 @@ meps_merged[
 meps_merged[
   final_status %in% c("Unidentified", "Generic") & is_drug_class == TRUE,
   final_status := "Therapeutic_Class"
+]
+
+# ==============================================================================
+# STEP 6: Join name
+# ==============================================================================
+
+# Select the Best Available Name (The Hierarchy)
+#    We prefer FDB names because they are usually cleaner than MEPS text.
+meps_merged[,
+  raw_join_name := fcase(
+    !is.na(fdb_brand)              , fdb_brand       , # Priority 1: FDB Brand Name
+    !is.na(rxnorm_rxname)          , rxnorm_rxname   , # Priority 2: RxNorm Name
+    !is.na(type) & type == "Brand" , text_match_name , # Priority 3: Dictionary Match
+    default = text_match_name # Fallback: Cleaned MEPS text
+  )
+]
+
+# 3. Create the Final Join Name (Clean it one last time)
+meps_merged[, final_join_name := clean_drug_text(raw_join_name)]
+
+# 4. Fill NAs (If cleaning resulted in empty string, use original text)
+meps_merged[
+  final_join_name == "" | is.na(final_join_name),
+  final_join_name := clean_drug_text(rxname)
 ]
 
 # ==============================================================================
@@ -450,6 +475,149 @@ if (abs(total_gross - sum(breakdown$gross_spend)) < 100) {
 } else {
   cat("WARNING: Spending dropped during categorization.\n")
 }
+
+# ==============================================================================
+# STEP 9.5: CLEANUP & BRIDGING (Fixing the Top 20 Mismatches)
+# ==============================================================================
+
+# 1. DEMOTE FAKE BRANDS (The "Garbage" Filter)
+#    These are ingredients or vague terms that FDB called "Brand" but are actually Generics.
+#    Removing these from 'final_status == Brand' shrinks your denominator and fixes the match rate.
+fake_brands <- c(
+  "ANTISEPTIC",
+  "CARDIOVASCULAR SUPPORT",
+  "METHYLPHENIDATE",
+  "PRAVASTATIN",
+  "AMOXICILLIN",
+  "IBUPROFEN",
+  "LUBRICANT EYE DROPS",
+  "SODIUM CHLORIDE",
+  "POTASSIUM CHLORIDE",
+  "GABAPENTIN",
+  "OMEPRAZOLE"
+)
+
+meps_merged[final_join_name %in% fake_brands, final_status := "Generic"]
+
+# 2. THE SUFFIX STRIPPER (Programmatic Fix)
+#    Removes "FLEXPEN", "KWIKPEN", "HANDIHALER", "DISCUS", "HFA"
+#    This fixes NOVOLOG, HUMALOG, SPIRIVA, ADVAIR automatically.
+suffix_pattern <- "\\b(FLEXPEN|KWIKPEN|HANDIHALER|DISKUS|HFA|SOLOSTAR|AUTOINJECTOR|PEN|VIAL|U-100|U-200|U-500)\\b"
+meps_merged[
+  final_status == "Brand",
+  final_join_name := str_remove_all(final_join_name, suffix_pattern)
+]
+meps_merged[
+  final_status == "Brand",
+  final_join_name := str_squish(final_join_name)
+] # Clean up spaces
+
+# 3. MANUAL BRIDGE (The Specific Fixes)
+#    Map the stubborn leftovers to their SSR names.
+manual_bridge <- rbind(
+  data.table(meps = "HUMULIN N", ssr = "HUMULIN"), # Check SSR for specific formulation
+  data.table(meps = "NOVOLIN N", ssr = "NOVOLIN"),
+  data.table(meps = "JANUMET", ssr = "JANUMET"), # Often mismatch on XR
+  data.table(meps = "JANUMET XR", ssr = "JANUMET"),
+  data.table(meps = "METOPROLOL SUCCINATE", ssr = "TOPROL XL"), # Common branded generic issue
+  data.table(meps = "ADDERALL XR", ssr = "ADDERALL"),
+  data.table(meps = "FARXIGA", ssr = "FARXIGA"), # Ensure spelling matches SSR exactly
+  data.table(meps = "SEROQUEL XR", ssr = "SEROQUEL")
+)
+
+# Apply Manual Bridge
+meps_merged <- merge(
+  meps_merged,
+  manual_bridge,
+  by.x = "final_join_name",
+  by.y = "meps",
+  all.x = TRUE
+)
+
+# Overwrite name if bridged
+meps_merged[!is.na(ssr), final_join_name := ssr]
+meps_merged[, ssr := NULL]
+
+# ==============================================================================
+# PROCEED TO STEP 10 (MATCHING)
+# ==============================================================================
+
+# ==============================================================================
+# STEP 10: MATCH "BRANDS" TO SSR HEALTH
+# ==============================================================================
+
+# 1. Filter for the candidates (The 62.3% of spending)
+brand_candidates <- meps_merged[final_status == "Brand"]
+
+# 2. Prepare SSR Data (if not already loaded/prepped)
+#    Ensure years are integers and names are upper/trimmed
+ssr[, year_id := as.integer(year_id)]
+ssr_lookup <- unique(ssr$ssr_rxname) # Vector for fast checking
+
+# 3. Create the Match Key (Exact + First Word Fallback)
+brand_candidates[,
+  ssr_match_key := fcase(
+    # A. Exact Match (Best)
+    final_join_name %in% ssr_lookup          , final_join_name          ,
+
+    # B. First Word Match (Safety Net for "BRAND 28 DAY" vs "BRAND")
+    word(final_join_name, 1) %in% ssr_lookup , word(final_join_name, 1) ,
+
+    # C. No Match
+    default = NA_character_
+  )
+]
+
+# 4. Merge SSR Data
+#    (We use the match key we just created)
+brands_matched <- merge(
+  brand_candidates,
+  ssr,
+  by.x = c("ssr_match_key", "year_id"),
+  by.y = c("ssr_rxname", "year_id"),
+  all.x = TRUE
+)
+
+# 5. Flag Success
+brands_matched[, in_ssr := !is.na(disease_area)]
+
+# ==============================================================================
+# DIAGNOSTICS: HOW GOOD IS THE MATCH?
+# ==============================================================================
+
+brand_total_spend <- brands_matched[, sum(tot_pay_amt, na.rm = T)]
+brand_match_spend <- brands_matched[in_ssr == TRUE, sum(tot_pay_amt, na.rm = T)]
+
+cat("\n=== BRAND MATCHING PERFORMANCE ===\n")
+cat(
+  "Total Spending identified as 'Brand':      $",
+  formatC(brand_total_spend, format = "d", big.mark = ","),
+  "\n"
+)
+cat(
+  "Spending successfully matched to SSR:      $",
+  formatC(brand_match_spend, format = "d", big.mark = ","),
+  "\n"
+)
+cat(
+  "SSR MATCH RATE (Dollars):                  ",
+  round(brand_match_spend / brand_total_spend * 100, 1),
+  "%\n"
+)
+
+# ==============================================================================
+# INSPECT THE LOSERS (Brands we couldn't find in SSR)
+# ==============================================================================
+
+# Look at the specific names that FDB called "Brand" but SSR didn't find
+unmatched_brands <- brand_candidates[
+  is.na(ssr_match_key),
+  .(spend = sum(tot_pay_amt, na.rm = T)),
+  by = final_join_name
+][order(-spend)]
+
+print("Top 20 Unmatched Brands:")
+print(head(unmatched_brands, 20))
 
 
 # ==============================================================================
@@ -743,296 +911,3 @@ meps_merged[final_status == "Class_Imputed", final_rebate_pct := imputed_rebate]
 
 # Calculate Final Net Price
 meps_merged[, net_pay_amt := tot_pay_amt * (1 - final_rebate_pct)]
-
-
-# JUNK FROM HERE DOWN
-
-# ==============================================================================
-# 5. MERGE MEPS & RUN CHECKS
-# ==============================================================================
-
-# Merge FDB
-meps_merged <- merge(meps, fdb, by = 'ndc', all.x = TRUE)
-# Merge RxNorm
-meps_merged <- merge(meps_merged, rxnorm_map, by = "ndc", all.x = TRUE)
-
-# CHECK 2: How much spending has a valid NDC match in FDB?
-spend_total <- meps_merged[, sum(tot_pay_amt, na.rm = TRUE)]
-spend_fdb <- meps_merged[!is.na(fdb_brand), sum(tot_pay_amt, na.rm = TRUE)]
-
-print(paste0(
-  "Total MEPS Spend: $",
-  formatC(spend_total, format = "d", big.mark = ",")
-))
-print(paste0(
-  "Spend successfully linked to FDB: ",
-  round(spend_fdb / spend_total * 100, 1),
-  "%"
-))
-
-# Strip dosages from MEPS names to improve matching (e.g. "LIPITOR 20MG" -> "LIPITOR")
-meps_merged[,
-  text_match_name := str_remove_all(
-    rxname,
-    "\\d+\\.?\\d*\\s*(MG|MCG|ML|G|L|TABS|CAPS|UNIT).*"
-  )
-]
-meps_merged[,
-  text_match_name := trimws(str_remove_all(text_match_name, "[[:punct:]]"))
-]
-
-#Apply the Dictionary to missing rows
-meps_merged[
-  is.na(fdb_genind) & text_match_name %in% known_generics,
-  fdb_genind := "Generic"
-]
-meps_merged[
-  is.na(fdb_genind) & text_match_name %in% known_brands,
-  fdb_genind := "Brand"
-]
-
-
-# --- PILE 1: Missing NDC (Use Text Matching) ---
-
-# what percent has valid rxname?
-meps_missing_ndc[,
-  .(
-    n = .N,
-    spend = sum(tot_pay_amt, na.rm = TRUE),
-    pct_spend = sum(tot_pay_amt, na.rm = TRUE) /
-      meps_missing_ndc[, sum(tot_pay_amt, na.rm = TRUE)] *
-      100
-  ),
-  by = .(has_rxname = !is.na(rxname) & rxname != "" & rxname != "-15")
-][order(-spend)]
-
-# some are therapeutic classes!
-# flag therapeutic category labels
-drug_class_pattern <-
-  meps_missing_ndc[,
-    is_drug_class := grepl(
-      drug_class_pattern,
-      rxname,
-      ignore.case = TRUE
-    )
-  ]
-
-
-# check actual drug names still unmatched
-x <- meps_missing_ndc[
-  is_drug_class == FALSE & is_device == FALSE & is.na(type),
-  .(
-    spend = sum(tot_pay_amt, na.rm = TRUE)
-  ),
-  by = rxname
-][order(-spend)]
-fwrite(x, paste0(data_dir, 'name_matching.csv'))
-
-# A. Clean the MEPS rxname
-clean_drug_text <- function(x) {
-  x <- toupper(x)
-  x <- str_remove_all(x, "\\b\\d+\\.?\\d*\\s*(MG|MCG|ML|G|L|MEQ|UNIT[S]?)\\b")
-  x <- str_remove_all(
-    x,
-    "\\b(TAB|CAP|INJ|SOL|HCL|SODIUM|EQ|ER|XR|DR|SYR|SUSP)\\b"
-  )
-  x <- str_remove_all(x, "[[:punct:]]")
-  x <- str_squish(x)
-  return(x)
-}
-
-meps_missing_ndc[, clean_rxname := clean_drug_text(rxname)]
-meps_missing_ndc[, first_word := toupper(trimws(word(rxname, 1)))]
-
-# B. Map against FDB Dictionary - try clean_rxname first, fall back to first_word
-meps_missing_ndc <- merge(
-  meps_missing_ndc,
-  name_dict,
-  by.x = "clean_rxname",
-  by.y = "clean_name",
-  all.x = TRUE
-)
-
-# For still-unmatched rows, try first_word
-meps_missing_ndc <- merge(
-  meps_missing_ndc,
-  name_dict,
-  by.x = "first_word",
-  by.y = "clean_name",
-  all.x = TRUE,
-  suffixes = c("", "_fw")
-)
-
-# Combine: use clean_rxname match if available, else first_word match
-meps_missing_ndc[,
-  type := fcase(
-    !is.na(type)    , type    ,
-    !is.na(type_fw) , type_fw ,
-    default = NA_character_
-  )
-]
-meps_missing_ndc[, type_fw := NULL]
-
-# C. Calculate Spending Breakdown
-spend_generic <- meps_missing_ndc[
-  type == "GENERIC",
-  sum(tot_pay_amt, na.rm = TRUE)
-]
-
-# Check improvement
-meps_missing_ndc[,
-  .(
-    n = .N,
-    spend = sum(tot_pay_amt, na.rm = TRUE),
-    pct_of_total = sum(tot_pay_amt, na.rm = TRUE) / total_spend * 100
-  ),
-  by = type
-][order(-spend)]
-
-
-#-----------------------------------------------------------------------------------
-
-# 2. Identified as Brand (Match these to SSR!)
-target_brands <- meps_missing_ndc[type == "BRAND"]
-
-# Match to SSR
-target_brands[, in_ssr := clean_rxname %in% ssr$ssr_join_name]
-
-# ==============================================================================
-# STEP 4: DIAGNOSE THE REMAINING UNMATCHED
-# ==============================================================================
-
-# Look at the top unmatched strings that FDB thinks are Brands
-unmatched_brands <- target_brands[
-  in_ssr == FALSE,
-  .(spend = sum(tot_pay_amt, na.rm = T)),
-  by = clean_rxname
-][order(-spend)]
-
-head(unmatched_brands, 20)
-
-# If you still have high spending here, run fuzzy matching ONLY on this subset
-ssr_names <- unique(ssr$ssr_join_name)
-unmatched_brands[,
-  best_match := ssr_names[amatch(clean_rxname, ssr_names, maxDist = 2)]
-]
-
-print("Top fuzzy candidates:")
-print(unmatched_brands[!is.na(best_match), .(clean_rxname, best_match, spend)])
-
-# ==============================================================================
-# STEP 5: MATCH DIAGNOSTICS
-# ==============================================================================
-
-total_spend <- dt[, sum(tot_pay_amt, na.rm = TRUE)]
-
-# --- PILE 2 overall breakdown ---
-pile2_total <- meps_missing_ndc[, sum(tot_pay_amt, na.rm = TRUE)]
-
-# How many rows/spend identified as Generic vs Brand vs Unidentified
-meps_missing_ndc[,
-  .(
-    n = .N,
-    spend = sum(tot_pay_amt, na.rm = TRUE),
-    pct_of_pile2 = sum(tot_pay_amt, na.rm = TRUE) / pile2_total * 100,
-    pct_of_total = sum(tot_pay_amt, na.rm = TRUE) / total_spend * 100
-  ),
-  by = type
-][order(-spend)]
-
-# --- Brand matching to SSR ---
-target_brands[,
-  .(
-    n = .N,
-    spend = sum(tot_pay_amt, na.rm = TRUE),
-    pct_of_total = sum(tot_pay_amt, na.rm = TRUE) / total_spend * 100
-  ),
-  by = in_ssr
-]
-
-# --- Fuzzy match recovery ---
-fuzzy_matches <- unmatched_brands[!is.na(best_match)]
-cat("Fuzzy matches found:", nrow(fuzzy_matches), "\n")
-cat(
-  "Spend recovered via fuzzy:",
-  sum(fuzzy_matches$spend, na.rm = TRUE) / total_spend * 100,
-  "% of total spend\n"
-)
-
-# --- Summary waterfall ---
-spend_generic_pct <- spend_generic / total_spend * 100
-spend_brand_matched <- target_brands[
-  in_ssr == TRUE,
-  sum(tot_pay_amt, na.rm = TRUE)
-]
-spend_brand_matched_pct <- spend_brand_matched / total_spend * 100
-spend_unmatched <- target_brands[
-  in_ssr == FALSE,
-  sum(tot_pay_amt, na.rm = TRUE)
-]
-spend_unmatched_pct <- spend_unmatched / total_spend * 100
-
-cat("\n=== PILE 2 (Missing NDC) Spend Waterfall ===\n")
-cat("Identified as Generic:       ", round(spend_generic_pct, 1), "%\n")
-cat("Identified as Brand, in SSR: ", round(spend_brand_matched_pct, 1), "%\n")
-cat("Brand, unmatched to SSR:     ", round(spend_unmatched_pct, 1), "%\n")
-cat(
-  "Unidentified (not in FDB):   ",
-  round(
-    (pile2_total - spend_generic - spend_brand_matched - spend_unmatched) /
-      total_spend *
-      100,
-    1
-  ),
-  "%\n"
-)
-
-
-# ---------------------------------------
-
-# Total spend unmatched to SSR across both piles
-
-# Pile 1: has NDC but no SSR match
-pile1_unmatched <- meps_valid_ndc[
-  !(ndc %in% fdb$NDC),
-  sum(tot_pay_amt, na.rm = TRUE)
-]
-
-# Pile 2: missing NDC, unidentified in FDB
-pile2_unidentified <- meps_missing_ndc[
-  is.na(type),
-  sum(tot_pay_amt, na.rm = TRUE)
-]
-
-# Pile 2: identified as brand but not in SSR
-pile2_brand_unmatched <- target_brands[
-  in_ssr == FALSE,
-  sum(tot_pay_amt, na.rm = TRUE)
-]
-
-cat("\n=== OVERALL MEPS SPEND UNMATCHED TO SSR ===\n")
-cat(
-  "Pile 1 (has NDC, no FDB/SSR match): ",
-  round(pile1_unmatched / total_spend * 100, 1),
-  "%\n"
-)
-cat(
-  "Pile 2 (no NDC, unidentified):      ",
-  round(pile2_unidentified / total_spend * 100, 1),
-  "%\n"
-)
-cat(
-  "Pile 2 (brand, not in SSR):         ",
-  round(pile2_brand_unmatched / total_spend * 100, 1),
-  "%\n"
-)
-cat(
-  "Total unmatched:                    ",
-  round(
-    (pile1_unmatched + pile2_unidentified + pile2_brand_unmatched) /
-      total_spend *
-      100,
-    1
-  ),
-  "%\n"
-)
