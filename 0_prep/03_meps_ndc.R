@@ -126,6 +126,68 @@ ssr <- fread(paste0(data_dir, "processed/ssr_cleaned/ssr_gtn_annual.csv"))[
 )]
 
 # ==============================================================================
+# STEP 4: PREPARE SSR-NDC crosswalk
+# ==============================================================================
+
+# 1. READ THE NDC CROSSWALK ----------------------------------------------------
+
+ndc_xw_path <- paste0(data_dir, "raw/ssr_health_ndcs/NDCUOM.PrStr.DATA.csv")
+ndc_xw <- as.data.table(
+  read.delim(ndc_xw_path, fileEncoding = "UTF-16LE", colClasses = "character")
+)
+setnames(ndc_xw, new = c("product", "strength", "ndc", "unit"))
+
+
+# 2. STANDARDIZE THE NDCs ------------------------------------------------------
+# A standard NDC must be exactly 11 numeric digits with no hyphens.
+# - gsub("[^0-9]", "", ndc) drops hyphens, spaces, and letters.
+# - str_pad left-pads with "0" to ensure it reaches 11 characters.
+
+ndc_xw[, ndc := gsub("[^0-9]", "", ndc)]
+ndc_xw[, ndc := str_pad(ndc, width = 11, side = "left", pad = "0")]
+
+# Drop empty or blatantly invalid NDCs (must be exactly 11 characters now)
+ndc_xw <- ndc_xw[!is.na(ndc) & nchar(ndc) == 11]
+
+
+# 3. STANDARDIZE THE PRODUCT NAMES ---------------------------------------------
+# Apply the exact same cleaning logic used on the SSR file so the strings match perfectly.
+ndc_xw[, product_clean := toupper(trimws(product))]
+ndc_xw <- unique(ndc_xw[, .(product_clean, ndc)])
+
+
+# 4. MERGE WITH SSR DATA -------------------------------------------------------
+# Join the crosswalk to the imputed SSR annual data.
+# Note: allow.cartesian = TRUE is required because 1 Product = Many Years (in SSR)
+# AND 1 Product = Many NDCs (in crosswalk). It will multiply the rows correctly.
+
+ssr_ndc_bridge <- merge(
+  ssr_annual_imputed,
+  ndc_xw_unique,
+  by = "product_clean",
+  all.x = TRUE, # Keep SSR products even if they don't have an NDC map
+  allow.cartesian = TRUE
+)
+
+
+# 5. VALIDATION ----------------------------------------------------------------
+cat("Rows in SSR Annual Data:", nrow(ssr_annual_imputed), "\n")
+cat("Rows in the new NDC Bridge:", nrow(ssr_ndc_bridge), "\n\n")
+
+# How successful was the crosswalk?
+mapped_prods <- uniqueN(ssr_ndc_bridge[!is.na(ndc_11)]$product_clean)
+total_prods <- uniqueN(ssr_ndc_bridge$product_clean)
+
+cat("SSR Products successfully mapped to >= 1 NDC:", mapped_prods, "\n")
+cat("SSR Products missing NDC mapping:", total_prods - mapped_prods, "\n")
+cat(
+  "Mapping Success Rate (by Product):",
+  round((mapped_prods / total_prods) * 100, 1),
+  "%\n"
+)
+
+
+# ==============================================================================
 # STEP 4: LOAD & CLEAN MEPS
 # ==============================================================================
 
