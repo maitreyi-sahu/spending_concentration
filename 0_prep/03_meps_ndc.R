@@ -46,28 +46,33 @@ name_dict <- rbind(dict_brands, dict_generics)
 name_dict <- unique(name_dict, by = "name") # remove dups
 
 # ==============================================================================
-# STEP 2: PREPARE RXNORM (Rescue Lookup)
+# STEP 2: PREPARE RXNORM (Rescue Lookup) & CLEANING FUNCTION
 # ==============================================================================
 
-# cleaning function (to apply to both brand & generics)
+# ENHANCED cleaning function for airtight text matching
 clean_drug_text <- function(x) {
-  x <- toupper(x)
-  # Remove packaging/noise
-  x <- str_remove_all(x, "\\(.*?\\)") # anything in parentheses
+  x <- toupper(as.character(x))
+
+  # 1. Remove anything in parentheses (often packaging/manufacturer noise)
+  x <- str_remove_all(x, "\\(.*?\\)")
+
+  # 2. Remove common MEPS survey temporal/dosing noise
   x <- str_remove_all(x, "\\b\\d+\\s*DAY\\b")
-  x <- str_remove_all(x, "\\bREFORMULATED.*")
-  x <- str_remove_all(x, "\\b(FIRST MONTH|STARTER|TITRATION).*")
-  # Remove dosages
-  x <- str_remove_all(x, "\\b\\d+\\.?\\d*\\/\\d+\\.?\\d*") # dosage ratios
-  x <- str_remove_all(x, "\\b\\d+\\.?\\d*\\s*(MG|MCG|ML|G|L|MEQ|UNIT[S]?)\\b")
-  # Remove forms/salts
-  x <- str_remove_all(
-    x,
-    "\\b(TAB|CAP|INJ|SOL|HCL|SODIUM|EQ|ER|XR|DR|SYR|SUSP)\\b"
-  )
-  # Cleanup
+  x <- str_remove_all(x, "\\b(REFORMULATED|FIRST MONTH|STARTER|TITRATION).*")
+
+  # 3. Remove numerical dosages, ratios, and percentages
+  x <- str_remove_all(x, "\\b\\d+\\.?\\d*\\s*\\/\\s*\\d+\\.?\\d*\\b") # e.g. 50/50
+  x <- str_remove_all(x, "\\b\\d+\\.?\\d*\\s*(MG|MCG|ML|G|L|MEQ|UNIT[S]?|%)\\b")
+
+  # 4. Remove salts, forms, and delivery device suffixes
+  # (Crucial for linking MEPS text to financial filings)
+  forms_salts_devices <- "\\b(TAB|CAP|INJ|SOL|HCL|SODIUM|EQ|ER|XR|DR|SYR|SUSP|PEN|FLEXPEN|KWIKPEN|RESPIMAT|HANDIHALER|DISKUS|HFA|AUTOINJECTOR|VIAL|SOLOSTAR)\\b"
+  x <- str_remove_all(x, forms_salts_devices)
+
+  # 5. Final cleanup: remove punctuation and extra whitespace
   x <- str_remove_all(x, "[[:punct:]]")
   x <- str_squish(x)
+
   return(x)
 }
 
@@ -78,36 +83,31 @@ rxnorm_map <- readRDS(paste0(
 )) |>
   setDT()
 
-#  Clean NDCs & Rename Columns
+# Clean NDCs & Rename Columns
 rxnorm_map[, ndc := stringr::str_pad(gsub("-", "", ndc), 11, pad = "0")]
 rxnorm_map[, `:=`(
   rxnorm_rxname = toupper(trimws(product_name)),
   rxnorm_genind = brand_generic
 )]
 
-# Deduplicate for the NDC Merge (One row per NDC)
 rxnorm_map <- unique(
   rxnorm_map[, .(ndc, rxnorm_rxname, rxnorm_genind)],
   by = "ndc"
 )
 
 # UPDATE DICTIONARY
-
-# brands
 rx_brands_raw <- unique(rxnorm_map[rxnorm_genind == "Brand", rxnorm_rxname])
 rx_dict_brands <- data.table(
   name = unique(clean_drug_text(rx_brands_raw)),
   type = "Brand"
 )
 
-# generics
 rx_generics_raw <- unique(rxnorm_map[rxnorm_genind == "Generic", rxnorm_rxname])
 rx_dict_generics <- data.table(
   name = unique(clean_drug_text(rx_generics_raw)),
   type = "Generic"
 )
 
-# Add to Master Dictionary
 name_dict <- rbind(name_dict, rx_dict_brands, rx_dict_generics)
 name_dict <- name_dict[name != ""]
 name_dict <- unique(name_dict, by = "name")
@@ -116,14 +116,19 @@ name_dict <- unique(name_dict, by = "name")
 # STEP 3: PREPARE SSR (imputed version)
 # ==============================================================================
 
-# Update your Step 3 to keep the rebate column:
 ssr <- fread(paste0(
   data_dir,
   "processed/ssr_cleaned/ssr_gtn_annual_imputed.csv"
 ))[
-  payer == 'Total' & smoothing_type == "4q moving average",
-][, ssr_rxname := toupper(trimws(product_clean))][, .(
-  ssr_rxname,
+  payer == 'Total' & smoothing_type == "4q moving average"
+]
+
+ssr[, product_clean := toupper(trimws(product_clean))]
+
+# Keep product_clean for the NDC merge, but create ssr_rxname for the text match
+ssr <- ssr[, .(
+  product_clean,
+  ssr_rxname = product_clean, # Duplicate column for later text matching
   disease_area,
   year_id,
   gtn_final
@@ -133,63 +138,31 @@ ssr <- fread(paste0(
 # STEP 4: PREPARE SSR-NDC crosswalk
 # ==============================================================================
 
-# 1. READ THE NDC CROSSWALK ----------------------------------------------------
-
 ndc_xw_path <- paste0(data_dir, "raw/ssr_health_ndcs/NDCUOM.PrStr.DATA.csv")
-ndc_xw <- as.data.table(
-  read.delim(ndc_xw_path, fileEncoding = "UTF-16LE", colClasses = "character")
-)
+ndc_xw <- as.data.table(read.delim(
+  ndc_xw_path,
+  fileEncoding = "UTF-16LE",
+  colClasses = "character"
+))
 setnames(ndc_xw, new = c("product", "strength", "ndc", "unit"))
 
-
-# 2. STANDARDIZE THE NDCs ------------------------------------------------------
-# A standard NDC must be exactly 11 numeric digits with no hyphens.
-# - gsub("[^0-9]", "", ndc) drops hyphens, spaces, and letters.
-# - str_pad left-pads with "0" to ensure it reaches 11 characters.
-
+# STANDARDIZE THE NDCs
 ndc_xw[, ndc := gsub("[^0-9]", "", ndc)]
 ndc_xw[, ndc := str_pad(ndc, width = 11, side = "left", pad = "0")]
-
-# Drop empty or blatantly invalid NDCs (must be exactly 11 characters now)
 ndc_xw <- ndc_xw[!is.na(ndc) & nchar(ndc) == 11]
 
-
-# 3. STANDARDIZE THE PRODUCT NAMES ---------------------------------------------
-# Apply the exact same cleaning logic used on the SSR file so the strings match perfectly.
+# STANDARDIZE THE PRODUCT NAMES
 ndc_xw[, product_clean := toupper(trimws(product))]
 ndc_xw <- unique(ndc_xw[, .(product_clean, ndc)])
 
-
-# 4. MERGE WITH SSR DATA -------------------------------------------------------
-# Join the crosswalk to the imputed SSR annual data.
-# Note: allow.cartesian = TRUE is required because 1 Product = Many Years (in SSR)
-# AND 1 Product = Many NDCs (in crosswalk). It will multiply the rows correctly.
-
+# MERGE WITH SSR DATA
 ssr_ndc_bridge <- merge(
-  ssr_annual_imputed,
+  ssr,
   ndc_xw,
   by = "product_clean",
-  all.x = TRUE, # Keep SSR products even if they don't have an NDC map
+  all.x = TRUE,
   allow.cartesian = TRUE
 )
-
-
-# 5. VALIDATION ----------------------------------------------------------------
-cat("Rows in SSR Annual Data:", nrow(ssr_annual_imputed), "\n")
-cat("Rows in the new NDC Bridge:", nrow(ssr_ndc_bridge), "\n\n")
-
-# How successful was the crosswalk?
-mapped_prods <- uniqueN(ssr_ndc_bridge[!is.na(ndc)]$product_clean)
-total_prods <- uniqueN(ssr_ndc_bridge$product_clean)
-
-cat("SSR Products successfully mapped to >= 1 NDC:", mapped_prods, "\n")
-cat("SSR Products missing NDC mapping:", total_prods - mapped_prods, "\n")
-cat(
-  "Mapping Success Rate (by Product):",
-  round((mapped_prods / total_prods) * 100, 1),
-  "%\n"
-)
-
 
 # ==============================================================================
 # STEP 5: LOAD & CLEAN MEPS
@@ -269,7 +242,7 @@ cat(
 )
 
 # NOTE: This match rate is out of TOTAL spend (including generics).
-# ~45.9%
+# ~45.8%
 
 # ==============================================================================
 # STEP 7: MERGE MEPS WITH DICTIONARIES
@@ -413,36 +386,73 @@ print("Top 20 Unidentified Items (Check for Missed Brands):")
 print(head(unidentified_pile, 20))
 
 # ==============================================================================
-# STEP 8.5: THE MISSING 20% RESCUE (Fixing FDB Errors & Private Brands)
+# STEP 9: CREATE FINAL JOIN NAME
+# ==============================================================================
+
+# 1. Select the Best Available Name (The Hierarchy)
+meps_merged[,
+  raw_join_name := fcase(
+    !is.na(fdb_brand)              , fdb_brand       ,
+    !is.na(rxnorm_rxname)          , rxnorm_rxname   ,
+    !is.na(type) & type == "Brand" , text_match_name ,
+    default = text_match_name
+  )
+]
+
+# 2. Clean it one last time using our new rigorous function
+meps_merged[, final_join_name := clean_drug_text(raw_join_name)]
+
+# 3. Fill NAs (If cleaning resulted in empty string, use original text)
+meps_merged[
+  final_join_name == "" | is.na(final_join_name),
+  final_join_name := clean_drug_text(rxname)
+]
+
+# ==============================================================================
+# STEP 10: MANUAL CLEANING (Fixing FDB Errors & Private Brands)
 # ==============================================================================
 
 # 1. THE FAKE BRANDS (Demote to Generic -> 0% Rebate)
-# FDB called these "Brands", but they are just generic chemicals or vague classes.
+# FDB called these "Brands", but they are just generic chemicals or weird typos.
 true_generics <- c(
   "ANTISEPTIC",
   "CARDIOVASCULAR SUPPORT",
   "PRAVASTATIN",
   "BUPROPION XL",
   "FENOFIBRATE",
-  "AZITHROMYCIN"
+  "AZITHROMYCIN",
+  "METOPROLOL SUCCINATE",
+  "DIVALPROEX",
+  "TROPICAL STYLE",
+  "CITALOPRAM HBR",
+  "LATANOPROST",
+  "FLOMAX"
 )
 meps_merged[final_join_name %in% true_generics, final_status := "Generic"]
 
-# 2. THE PRIVATE BRANDS (Promote to Tier 3: Class Imputed)
+# 2. STRING BRIDGING (Fixing Minor Naming Mismatches for SSR Text Match)
+# These are public drugs that SSR HAS, but the names don't quite match.
+# By forcing the name here, Step 13 (Tier 2) will naturally catch them.
+meps_merged[final_join_name == "NOVOLIN N", final_join_name := "NOVOLIN"]
+
+# 3. THE PRIVATE & MISSING BRANDS (Promote to Tier 3: Class Imputed)
 # We map these to SSR Disease Areas to get the class average rebate.
 private_brand_map <- rbind(
-  data.table(name = "SPIRIVA HANDIHALER", ssr_area = "Respiratory"),
-  data.table(name = "SPIRIVA RESPIMAT", ssr_area = "Respiratory"),
-  data.table(name = "COMBIVENT RESPIMAT", ssr_area = "Respiratory"),
+  data.table(name = "SPIRIVA", ssr_area = "Respiratory"),
+  data.table(name = "COMBIVENT", ssr_area = "Respiratory"),
   data.table(name = "OXYCONTIN", ssr_area = "Central Nervous System"),
+  data.table(name = "HYSINGLA", ssr_area = "Central Nervous System"),
+  data.table(name = "PROVIGIL", ssr_area = "Central Nervous System"),
+  data.table(name = "VYVANSE", ssr_area = "Central Nervous System"),
+  data.table(name = "FOCALIN", ssr_area = "Central Nervous System"),
+  data.table(name = "ADDERALL", ssr_area = "Central Nervous System"),
+  data.table(name = "PROZAC", ssr_area = "Central Nervous System"),
   data.table(name = "PRADAXA", ssr_area = "Cardiovascular"),
-  data.table(name = "ACTOS", ssr_area = "Metabolic"),
   data.table(name = "BENICAR", ssr_area = "Cardiovascular"),
-  data.table(name = "CONCERTA", ssr_area = "Central Nervous System"),
+  data.table(name = "ACTOS", ssr_area = "Metabolic"),
   data.table(name = "GRALISE", ssr_area = "Central Nervous System")
 )
 
-# Apply the private mapping
 meps_merged <- merge(
   meps_merged,
   private_brand_map,
@@ -451,7 +461,6 @@ meps_merged <- merge(
   all.x = TRUE
 )
 
-# Calculate the Class Average Rebate directly from SSR
 ssr_class_avgs <- ssr[,
   .(
     avg_class_rebate = mean(gtn_final, na.rm = TRUE)
@@ -459,7 +468,6 @@ ssr_class_avgs <- ssr[,
   by = .(disease_area, year_id)
 ]
 
-# Merge the class averages onto our private brands
 meps_merged <- merge(
   meps_merged,
   ssr_class_avgs,
@@ -468,7 +476,6 @@ meps_merged <- merge(
   all.x = TRUE
 )
 
-# If a private brand matched, officially change its status to Class_Imputed
 meps_merged[
   !is.na(ssr_area),
   `:=`(
@@ -477,11 +484,10 @@ meps_merged[
   )
 ]
 
-# Clean up temp columns
 meps_merged[, c("ssr_area", "avg_class_rebate") := NULL]
 
 # ==============================================================================
-# STEP 9: FLAG THERAPEUTIC CLASSES (NON-MATCHABLE)
+# STEP 11: FLAG THERAPEUTIC CLASSES (NON-MATCHABLE)
 # ==============================================================================
 
 # Define pattern of words that indicate a Class, not a Drug
@@ -541,7 +547,7 @@ meps_merged[,
 
 
 # ==============================================================================
-# STEP 10: UPDATE FINAL STATUS (PRIORITIZE FLAGS)
+# STEP 12: UPDATE FINAL STATUS (PRIORITIZE FLAGS)
 # ==============================================================================
 # We modify 'final_status' so these categories appear in the final breakdown.
 # CRITICAL PRIORITY ORDER:
@@ -562,29 +568,6 @@ meps_merged[
   final_status := "Therapeutic_Class"
 ]
 
-# ==============================================================================
-# STEP 11: Join name
-# ==============================================================================
-
-# Select the Best Available Name (The Hierarchy)
-#    We prefer FDB names because they are usually cleaner than MEPS text.
-meps_merged[,
-  raw_join_name := fcase(
-    !is.na(fdb_brand)              , fdb_brand       , # Priority 1: FDB Brand Name
-    !is.na(rxnorm_rxname)          , rxnorm_rxname   , # Priority 2: RxNorm Name
-    !is.na(type) & type == "Brand" , text_match_name , # Priority 3: Dictionary Match
-    default = text_match_name # Fallback: Cleaned MEPS text
-  )
-]
-
-# 3. Create the Final Join Name (Clean it one last time)
-meps_merged[, final_join_name := clean_drug_text(raw_join_name)]
-
-# 4. Fill NAs (If cleaning resulted in empty string, use original text)
-meps_merged[
-  final_join_name == "" | is.na(final_join_name),
-  final_join_name := clean_drug_text(rxname)
-]
 
 # ==============================================================================
 # STEP 12 & 13: TEXT MATCHING & FINAL REBATE ASSIGNMENT
@@ -668,10 +651,6 @@ meps_merged[, net_pay_amt := tot_pay_amt * (1 - final_rebate_pct)]
 # FINAL WATERFALL DIAGNOSTICS
 # ==============================================================================
 
-# ==============================================================================
-# FINAL WATERFALL DIAGNOSTICS
-# ==============================================================================
-
 cat("\n========================================\n")
 cat(" FINAL REBATE WATERFALL MATCHING \n")
 cat("========================================\n")
@@ -732,4 +711,4 @@ unmatched_brands <- meps_merged[
 cat("\n========================================\n")
 cat(" TOP 15 UNMATCHED BRANDS (The Missing 20%) \n")
 cat("========================================\n")
-print(head(unmatched_brands, 15))
+print(head(unmatched_brands, 30))
