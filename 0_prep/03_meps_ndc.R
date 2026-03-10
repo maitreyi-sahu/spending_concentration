@@ -386,7 +386,74 @@ print("Top 20 Unidentified Items (Check for Missed Brands):")
 print(head(unidentified_pile, 20))
 
 # ==============================================================================
-# STEP 9: CREATE FINAL JOIN NAME
+# STEP 9: FLAG DEVICES
+# ==============================================================================
+
+device_patterns <- paste0(
+  "\\b(",
+  paste(
+    c(
+      # Device types
+      "DEVICE",
+      "METER",
+      "MONITOR",
+      "PUMP",
+      "SYRINGE",
+      "NEEDLE",
+      "LANCET",
+      "STRIP",
+      "TEST STRIP",
+      "SENSOR",
+      "CATHETER",
+      "CANNULA",
+      "TUBING",
+      "INSULIN PUMP",
+      "GLUCOSE METER",
+      "BLOOD GLUCOSE",
+      # Wound / skin
+      "BANDAGE",
+      "DRESSING",
+      "GAUZE",
+      "WRAP",
+      "TAPE",
+      "PAD",
+      # Nutritional / supplements
+      "ENSURE",
+      "BOOST",
+      "PEDIASURE",
+      "FORMULA",
+      "SUPPLEMENT",
+      # Diagnostic
+      "DIAGNOSTIC",
+      "REAGENT",
+      "CONTRAST",
+      # Misc non-drug
+      "CONDOM",
+      "DIAPHRAGM",
+      "SPACER",
+      "NEBULIZER"
+    ),
+    collapse = "|"
+  ),
+  ")\\b"
+)
+
+meps_merged[, is_device := grepl(device_patterns, toupper(rxname), perl = TRUE)]
+
+cat("Device rows flagged:   ", meps_merged[is_device == TRUE, .N], "\n")
+cat(
+  "Device spend flagged: $",
+  formatC(
+    meps_merged[is_device == TRUE, sum(tot_pay_amt, na.rm = TRUE)],
+    format = "f",
+    big.mark = ",",
+    digits = 0
+  ),
+  "\n"
+)
+
+# ==============================================================================
+# STEP 10: CREATE FINAL JOIN NAME
 # ==============================================================================
 
 # 1. Select the Best Available Name (The Hierarchy)
@@ -408,7 +475,7 @@ meps_merged[
   final_join_name := clean_drug_text(rxname)
 ]
 # ==============================================================================
-# STEP 12: THE FAKE BRANDS (Demote to Generic -> 0% Rebate)
+# STEP 11: THE FAKE BRANDS (Demote to Generic -> 0% Rebate)
 # ==============================================================================
 
 true_generics <- c(
@@ -492,11 +559,20 @@ true_generics <- c(
   "SOMA",
   "DIGOX",
   "DILT",
-  "ESTROGENS",
   "ARMOUR THYROID",
   "MYORISAN",
   "ZENATANE",
-  "ANALGESIC"
+  "ANALGESIC",
+  "LOSARTAN",
+  "ESTROGENS",
+  "ASPIRIN EC",
+  "FLEXERIL",
+  "OXYCODONE",
+  "CEFUROXIME",
+  "FERROUS SULFATE",
+  "METOPROLOL TARTRATE",
+  "PEDIASURE WITH FIBER",
+  "KLORCON M20"
 )
 
 meps_merged[final_join_name %in% true_generics, final_status := "Generic"]
@@ -504,7 +580,7 @@ meps_merged[final_join_name == "NOVOLIN N", final_join_name := "NOVOLIN"]
 
 
 # ==============================================================================
-# STEP 13: THE REBATE WATERFALL (Tiers 1, 2, 3)
+# STEP 12: THE REBATE WATERFALL (Tiers 1, 2, 3)
 # ==============================================================================
 
 # Initialize everyone cleanly
@@ -559,6 +635,9 @@ meps_merged[
 ]
 meps_merged[, temp_row_id := NULL]
 
+# Clean up
+meps_merged[rxname %like% "ALLEGRA-D", final_join_name := "ALLEGRA D"]
+
 # ------------------------------------------------------------------------------
 # TIER 3: CLASS AVERAGE IMPUTATION (Private Brands & Vague Classes)
 # ------------------------------------------------------------------------------
@@ -611,8 +690,12 @@ private_brand_map <- rbind(
   data.table(name = "PROAIR", ssr_area = "COPD/Asthma (Other)"),
   data.table(name = "XOPENEX", ssr_area = "COPD/Asthma (Other)"),
   data.table(name = "AUVIQ", ssr_area = "COPD/Asthma (Other)"),
+  data.table(name = "FLONASE", ssr_area = "Nasal glucocorticoids"),
+  data.table(name = "DYMISTA", ssr_area = "Nasal glucocorticoids"),
+  data.table(name = "ASTEPRO", ssr_area = "Nasal glucocorticoids"),
+  data.table(name = "ALLEGRA D", ssr_area = "Nasal glucocorticoids"),
 
-  # Pain / Opioids
+  # Pain (Opioids)
   data.table(name = "OXYCONTIN", ssr_area = "Pain (Opioids)"),
   data.table(name = "HYSINGLA", ssr_area = "Pain (Opioids)"),
   data.table(name = "OPANA", ssr_area = "Pain (Opioids)"),
@@ -621,20 +704,26 @@ private_brand_map <- rbind(
   data.table(name = "BUTRANS", ssr_area = "Pain (Opioids)"),
   data.table(name = "NORCO", ssr_area = "Pain (Opioids)"),
 
-  # Pain / Non-Opioids
+  # Pain (Non-Opioids)
   data.table(name = "LIDODERM", ssr_area = "Pain, Inflammation (Non-Opioids)"),
   data.table(name = "FLECTOR", ssr_area = "Pain, Inflammation (Non-Opioids)"),
   data.table(name = "SKELAXIN", ssr_area = "Pain, Inflammation (Non-Opioids)"),
   data.table(name = "AMRIX", ssr_area = "Pain, Inflammation (Non-Opioids)"),
   data.table(name = "SOLARAZE", ssr_area = "Pain, Inflammation (Non-Opioids)"),
+  data.table(name = "NAPRELAN", ssr_area = "Pain, Inflammation (Non-Opioids)"),
+  data.table(
+    name = "ARTHROTEC 75",
+    ssr_area = "Pain, Inflammation (Non-Opioids)"
+  ),
 
-  # CNS - Anticonvulsants
+  # CNS: Anticonvulsants
+  data.table(name = "LYRICA", ssr_area = "Anticonvulsants"),
   data.table(name = "GRALISE", ssr_area = "Anticonvulsants"),
   data.table(name = "HORIZANT", ssr_area = "Anticonvulsants"),
   data.table(name = "TRILEPTAL", ssr_area = "Anticonvulsants"),
   data.table(name = "CARBATROL", ssr_area = "Anticonvulsants"),
 
-  # CNS - ADHD
+  # CNS: ADHD
   data.table(name = "VYVANSE", ssr_area = "ADHD"),
   data.table(name = "FOCALIN", ssr_area = "ADHD"),
   data.table(name = "ADDERALL", ssr_area = "ADHD"),
@@ -645,11 +734,13 @@ private_brand_map <- rbind(
   data.table(name = "INTUNIV", ssr_area = "ADHD"),
   data.table(name = "JORNAY PM", ssr_area = "ADHD"),
 
-  # CNS - Depression
+  # CNS: Depression
   data.table(name = "PROZAC", ssr_area = "Depression"),
   data.table(name = "LEXAPRO", ssr_area = "Depression"),
+  data.table(name = "EFFEXOR", ssr_area = "Depression"),
 
-  # CNS - Other
+  # CNS: Other
+  data.table(name = "RISPERDAL", ssr_area = "Atyp. antipsych"),
   data.table(name = "PROVIGIL", ssr_area = "Narcolepsy"),
   data.table(name = "NUVIGIL", ssr_area = "Narcolepsy"),
   data.table(name = "MIRAPEX", ssr_area = "Parkinson's"),
@@ -658,6 +749,7 @@ private_brand_map <- rbind(
   data.table(name = "VALIUM", ssr_area = "Benzodiazepines"),
   data.table(name = "KLONOPIN", ssr_area = "Benzodiazepines"),
   data.table(name = "SILENOR", ssr_area = "Insomnia"),
+  data.table(name = "LUNESTA", ssr_area = "Insomnia"),
 
   # Cardiovascular
   data.table(name = "PRADAXA", ssr_area = "Oral Anticoagulants"),
@@ -674,10 +766,19 @@ private_brand_map <- rbind(
     name = "LOTREL",
     ssr_area = "Cardiovascular (Calcium Channel Blockers)"
   ),
+  data.table(
+    name = "PROCARDIA XL",
+    ssr_area = "Cardiovascular (Calcium Channel Blockers)"
+  ),
+  data.table(
+    name = "SULAR",
+    ssr_area = "Cardiovascular (Calcium Channel Blockers)"
+  ),
   data.table(name = "LIVALO", ssr_area = "Cholesterol (Non-PCSK9s)"),
   data.table(name = "SIMCOR", ssr_area = "Cholesterol (Non-PCSK9s)"),
   data.table(name = "ADVICOR", ssr_area = "Cholesterol (Non-PCSK9s)"),
   data.table(name = "ANTARA", ssr_area = "Cholesterol (Non-PCSK9s)"),
+  data.table(name = "NIASPAN", ssr_area = "Cholesterol (Non-PCSK9s)"),
   data.table(name = "NITROSTAT", ssr_area = "Cardiovascular (Other)"),
   data.table(name = "VASCULERA", ssr_area = "Cardiovascular (Other)"),
 
@@ -695,14 +796,21 @@ private_brand_map <- rbind(
     ssr_area = "Diabetes (Rapid-acting/mix insulins)"
   ),
   data.table(name = "FIASP", ssr_area = "Diabetes (Rapid-acting/mix insulins)"),
+  data.table(
+    name = "ADMELOG",
+    ssr_area = "Diabetes (Rapid-acting/mix insulins)"
+  ),
   data.table(name = "NOVOLIN", ssr_area = "Diabetes (Short-acting insulins)"),
   data.table(name = "LEVEMIR", ssr_area = "Diabetes (Long-acting insulins)"),
   data.table(name = "SEMGLEE", ssr_area = "Diabetes (Long-acting insulins)"),
   data.table(name = "VICTOZA 3PAK", ssr_area = "Diabetes (GLP-1 Agonists)"),
+  data.table(name = "STEGLATRO", ssr_area = "Diabetes (SGLT2 Inhibitors)"),
   data.table(name = "ACTOS", ssr_area = "Diabetes (Other)"),
   data.table(name = "AVANDIA", ssr_area = "Diabetes (Other)"),
   data.table(name = "ACTOPLUS MET", ssr_area = "Diabetes (Other)"),
   data.table(name = "AVANDARYL", ssr_area = "Diabetes (Other)"),
+  data.table(name = "AVANDAMET", ssr_area = "Diabetes (Other)"),
+  data.table(name = "DUETACT", ssr_area = "Diabetes (Other)"),
 
   # Renal / Bone Metabolism
   data.table(name = "RENAGEL", ssr_area = "Hyperphosphatemia"),
@@ -712,22 +820,27 @@ private_brand_map <- rbind(
   data.table(name = "RAYALDEE", ssr_area = "Hyperparathyroidism"),
   data.table(name = "HECTOROL", ssr_area = "Hyperparathyroidism"),
 
-  # Female Hormone Therapy / Contraceptives
+  # Female Hormone Therapy
   data.table(name = "VAGIFEM", ssr_area = "Female Hormone Therapy"),
   data.table(name = "ESTRING", ssr_area = "Female Hormone Therapy"),
   data.table(name = "VIVELLEDOT", ssr_area = "Female Hormone Therapy"),
   data.table(name = "CLIMARA", ssr_area = "Female Hormone Therapy"),
   data.table(name = "ESTROGEL", ssr_area = "Female Hormone Therapy"),
   data.table(name = "YUVAFEM", ssr_area = "Female Hormone Therapy"),
+  data.table(name = "MINIVELLE", ssr_area = "Female Hormone Therapy"),
+
+  # Contraceptives
   data.table(name = "XULANE", ssr_area = "Contraceptives"),
   data.table(name = "TAYTULLA", ssr_area = "Contraceptives"),
   data.table(name = "JUNEL FE", ssr_area = "Contraceptives"),
   data.table(name = "ELURYNG", ssr_area = "Contraceptives"),
+  data.table(name = "TRISPRINTEC", ssr_area = "Contraceptives"),
+  data.table(name = "APRI", ssr_area = "Contraceptives"),
 
   # Thyroid
   data.table(name = "TIROSINT", ssr_area = "Hypothyroidism"),
 
-  # GI
+  # Gastrointestinal
   data.table(name = "PENTASA", ssr_area = "IBD"),
   data.table(name = "LIALDA", ssr_area = "IBD"),
   data.table(name = "PREVACID", ssr_area = "Anti-Ulcer (PPIs)"),
@@ -735,34 +848,36 @@ private_brand_map <- rbind(
   data.table(name = "AMITIZA", ssr_area = "Constipation"),
   data.table(name = "ZENPEP", ssr_area = "Exocrine Pancreatic Insufficiency"),
   data.table(name = "DICLEGIS", ssr_area = "Antiemetics"),
+  data.table(name = "ZOFRAN", ssr_area = "Antiemetics"),
 
   # Ophthalmology
-  data.table(name = "RESTASIS", ssr_area = "Ophthalmics (Other)"),
-  data.table(name = "VIGAMOX", ssr_area = "Ophthalmics (Other)"),
-  data.table(name = "DUREZOL", ssr_area = "Ophthalmics (Other)"),
-  data.table(name = "CEQUA", ssr_area = "Ophthalmics (Other)"),
-  data.table(name = "TOBRADEX", ssr_area = "Ophthalmics (Other)"),
-  data.table(name = "PROLENSA", ssr_area = "Ophthalmics (Other)"),
   data.table(name = "LUMIGAN", ssr_area = "Glaucoma"),
   data.table(name = "ALPHAGAN P", ssr_area = "Glaucoma"),
   data.table(name = "COMBIGAN", ssr_area = "Glaucoma"),
   data.table(name = "AZOPT", ssr_area = "Glaucoma"),
   data.table(name = "TRAVATAN", ssr_area = "Glaucoma"),
   data.table(name = "BETIMOL", ssr_area = "Glaucoma"),
+  data.table(name = "RESTASIS", ssr_area = "Ophthalmics (Other)"),
+  data.table(name = "VIGAMOX", ssr_area = "Ophthalmics (Other)"),
+  data.table(name = "DUREZOL", ssr_area = "Ophthalmics (Other)"),
+  data.table(name = "CEQUA", ssr_area = "Ophthalmics (Other)"),
+  data.table(name = "TOBRADEX", ssr_area = "Ophthalmics (Other)"),
+  data.table(name = "PROLENSA", ssr_area = "Ophthalmics (Other)"),
+  data.table(name = "PAZEO", ssr_area = "Ophthalmics (Other)"),
 
   # Dermatology
   data.table(name = "ORACEA", ssr_area = "Rosacea"),
+  data.table(name = "FINACEA", ssr_area = "Rosacea"),
+  data.table(name = "METROGEL", ssr_area = "Rosacea"),
   data.table(name = "ABSORICA", ssr_area = "Acne (Orals)"),
   data.table(name = "AMNESTEEM", ssr_area = "Acne (Orals)"),
   data.table(name = "EPIDUO", ssr_area = "Acne (Topicals)"),
+  data.table(name = "EPIDUO FORTE", ssr_area = "Acne (Topicals)"),
   data.table(name = "DIFFERIN", ssr_area = "Acne (Topicals)"),
   data.table(name = "TAZORAC", ssr_area = "Acne (Topicals)"),
   data.table(name = "TACLONEX", ssr_area = "Psoriasis"),
+  data.table(name = "DOVONEX", ssr_area = "Psoriasis"),
   data.table(name = "CLOBEX", ssr_area = "Atopic dermatitis"),
-
-  # Nasal
-  data.table(name = "DYMISTA", ssr_area = "Nasal glucocorticoids"),
-  data.table(name = "ASTEPRO", ssr_area = "Nasal glucocorticoids"),
 
   # Oncology
   data.table(name = "FEMARA", ssr_area = "Oncology (Hormonal / GnRH)"),
@@ -775,10 +890,48 @@ private_brand_map <- rbind(
   data.table(name = "AUGMENTIN", ssr_area = "Antibacterials"),
   data.table(name = "AVELOX", ssr_area = "Antibacterials"),
   data.table(name = "VALCYTE", ssr_area = "Antiviral (Other)"),
+  data.table(name = "VIRAMUNE", ssr_area = "HIV"),
 
   # Autoimmune
   data.table(name = "OTREXUP", ssr_area = "DMARDs (Other)"),
-  data.table(name = "RASUVO", ssr_area = "DMARDs (Other)")
+  data.table(name = "RASUVO", ssr_area = "DMARDs (Other)"),
+
+  # Other
+  data.table(name = "COLCRYS", ssr_area = "Gout"),
+
+  # MEPS class names
+  data.table(name = "ANTI-INFECTIVES", ssr_area = "Antibacterials"),
+  data.table(name = "COAGULATION MODIFIERS", ssr_area = "Oral Anticoagulants"),
+  data.table(
+    name = "81 COAGULATION MODIFIERS",
+    ssr_area = "Oral Anticoagulants"
+  ),
+  data.table(
+    name = "ANTINEOPLASTIC HORMONES",
+    ssr_area = "Oncology (Hormonal / GnRH)"
+  ),
+  data.table(name = "ATYPICAL ANTIPSYCHOTICS", ssr_area = "Atyp. antipsych"),
+  data.table(name = "ANTIDIABETIC COMBINATIONS", ssr_area = "Diabetes (Other)"),
+  data.table(name = "ANTIDIABETIC AGENTS", ssr_area = "Diabetes (Other)"),
+  data.table(name = "ANTICONVULSANTS", ssr_area = "Anticonvulsants"),
+  data.table(name = "ANTIVIRAL COMBINATIONS", ssr_area = "Antiviral (Other)"),
+  data.table(
+    name = "ANTIHYPERLIPIDEMIC AGENTS",
+    ssr_area = "Cholesterol (Non-PCSK9s)"
+  ),
+  data.table(name = "BRONCHODILATOR COMBINATIONS", ssr_area = "COPD (Combos)"),
+  data.table(name = "254 IMMUNOLOGIC AGENTS", ssr_area = "DMARDs (Anti-TNF)"),
+  data.table(
+    name = "MULTIKINASE INHIBITORS",
+    ssr_area = "Oncology (Kinase Inhibitors)"
+  ),
+  data.table(name = "NARCOTIC ANALGESICS", ssr_area = "Pain (Opioids)"),
+  data.table(name = "ANTIMIGRAINE AGENTS", ssr_area = "Migraine (Triptans)"),
+  data.table(
+    name = "HORMONES/HORMONE MODIFIERS",
+    ssr_area = "Female Hormone Therapy"
+  ),
+  data.table(name = "105 MISCELLANEOUS AGENTS", ssr_area = "Rare Diseases")
 )
 
 full_tier3_map <- rbind(private_brand_map, class_text_map)
@@ -829,7 +982,7 @@ meps_merged[, c("ssr_area", "avg_class_rebate") := NULL]
 
 
 # ==============================================================================
-# STEP 14: CALCULATE FINAL NET SPENDING
+# STEP 13: CALCULATE FINAL NET SPENDING
 # ==============================================================================
 
 meps_merged[final_rebate_pct < 0, final_rebate_pct := 0]
@@ -838,58 +991,177 @@ meps_merged[is.na(final_rebate_pct), final_rebate_pct := 0]
 
 meps_merged[, net_pay_amt := tot_pay_amt * (1 - final_rebate_pct)]
 
-
 # ==============================================================================
-# STEP 15: FINAL WATERFALL DIAGNOSTICS
+# STEP 14: FINAL WATERFALL DIAGNOSTICS
 # ==============================================================================
 
-cat("\n========================================\n")
-cat(" FINAL REBATE WATERFALL MATCHING \n")
-cat("========================================\n")
+# Mutually exclusive buckets - must sum to total_spend
+generic_spend <- sum(
+  meps_merged[is_device == FALSE & final_status == "Generic", tot_pay_amt],
+  na.rm = TRUE
+)
+ndc_text_spend <- sum(
+  meps_merged[
+    is_device == FALSE &
+      final_status != "Generic" &
+      match_tier %in% c("Tier 1: NDC", "Tier 2: Text"),
+    tot_pay_amt
+  ],
+  na.rm = TRUE
+)
+imputed_rebate_spend <- sum(
+  meps_merged[
+    is_device == FALSE & match_tier == "Tier 3: Class Imputed",
+    tot_pay_amt
+  ],
+  na.rm = TRUE
+)
+unmatched_brand_spend <- sum(
+  meps_merged[
+    is_device == FALSE & final_status == "Brand" & match_tier == "Unmatched",
+    tot_pay_amt
+  ],
+  na.rm = TRUE
+)
+unidentified_spend <- sum(
+  meps_merged[is_device == FALSE & final_status == "Unidentified", tot_pay_amt],
+  na.rm = TRUE
+)
+device_spend <- sum(meps_merged[is_device == TRUE, tot_pay_amt], na.rm = TRUE)
+total_spend <- sum(meps_merged[, tot_pay_amt], na.rm = TRUE)
 
-total_brand_universe <- meps_merged[
-  final_status %in% c("Brand", "Class_Imputed"),
-  sum(tot_pay_amt, na.rm = T)
-]
 
+# --- Rebate Match Tiers ---
 ndc_spend <- meps_merged[
-  match_tier == "Tier 1: NDC",
-  sum(tot_pay_amt, na.rm = T)
+  is_device == FALSE & match_tier == "Tier 1: NDC",
+  sum(tot_pay_amt, na.rm = TRUE)
 ]
 text_spend <- meps_merged[
-  match_tier == "Tier 2: Text",
-  sum(tot_pay_amt, na.rm = T)
+  is_device == FALSE & match_tier == "Tier 2: Text",
+  sum(tot_pay_amt, na.rm = TRUE)
 ]
 class_spend <- meps_merged[
-  match_tier == "Tier 3: Class Imputed",
-  sum(tot_pay_amt, na.rm = T)
+  is_device == FALSE & match_tier == "Tier 3: Class Imputed",
+  sum(tot_pay_amt, na.rm = TRUE)
+]
+unmatched_brand_spend <- meps_merged[
+  is_device == FALSE & final_status == "Brand" & match_tier == "Unmatched",
+  sum(tot_pay_amt, na.rm = TRUE)
 ]
 
-cat(sprintf(
-  "1. Exact NDC Match:     $%13s (%4.1f%% of Brand Spend)\n",
-  formatC(ndc_spend, format = "d", big.mark = ","),
-  ndc_spend / total_brand_universe * 100
-))
-cat(sprintf(
-  "2. Exact Text Match:    $%13s (%4.1f%% of Brand Spend)\n",
-  formatC(text_spend, format = "d", big.mark = ","),
-  text_spend / total_brand_universe * 100
-))
-cat(sprintf(
-  "3. Class Average Match: $%13s (%4.1f%% of Brand Spend)\n",
-  formatC(class_spend, format = "d", big.mark = ","),
-  class_spend / total_brand_universe * 100
-))
-cat("----------------------------------------\n")
-cat(sprintf(
-  "TOTAL BRAND MATCH RATE:               %4.1f%%\n",
-  (ndc_spend + text_spend + class_spend) / total_brand_universe * 100
-))
-cat("========================================\n")
+# Known rebate = generics (0%) + all matched brands
+known_spend <- generic_spend + ndc_text_spend
+brand_universe <- ndc_text_spend + imputed_rebate_spend + unmatched_brand_spend
 
+cat("\n========================================================\n")
+cat("           MEPS SPEND COMPOSITION\n")
+cat("========================================================\n")
+cat(sprintf(
+  "Total MEPS spend:                $%15s\n",
+  formatC(total_spend, format = "f", big.mark = ",", digits = 0)
+))
+cat(sprintf(
+  "  Devices (excluded):            $%15s  (%4.1f%% of total)\n",
+  formatC(device_spend, format = "f", big.mark = ",", digits = 0),
+  device_spend / total_spend * 100
+))
+cat(sprintf(
+  "  Non-device spend:              $%15s  (%4.1f%% of total)\n",
+  formatC(total_spend - device_spend, format = "f", big.mark = ",", digits = 0),
+  (total_spend - device_spend) / total_spend * 100
+))
+cat(sprintf(
+  "    Generic (rebate = 0%%):       $%15s  (%4.1f%% of total)\n",
+  formatC(generic_spend, format = "f", big.mark = ",", digits = 0),
+  generic_spend / total_spend * 100
+))
+cat(sprintf(
+  "    Brand universe:              $%15s  (%4.1f%% of total)\n",
+  formatC(brand_universe, format = "f", big.mark = ",", digits = 0),
+  brand_universe / total_spend * 100
+))
+cat(sprintf(
+  "    Unidentified:                $%15s  (%4.1f%% of total)\n",
+  formatC(unidentified_spend, format = "f", big.mark = ",", digits = 0),
+  unidentified_spend / total_spend * 100
+))
+
+cat("\n========================================================\n")
+cat("           REBATE WATERFALL (Brand Universe)\n")
+cat("========================================================\n")
+cat(sprintf(
+  "Brand universe:                  $%15s\n",
+  formatC(brand_universe, format = "f", big.mark = ",", digits = 0)
+))
+cat(sprintf(
+  "  Tier 1+2 - Exact match:        $%15s  (%4.1f%% of brand)\n",
+  formatC(ndc_text_spend, format = "f", big.mark = ",", digits = 0),
+  ndc_text_spend / brand_universe * 100
+))
+cat(sprintf(
+  "  Tier 3 - Class average:        $%15s  (%4.1f%% of brand)\n",
+  formatC(imputed_rebate_spend, format = "f", big.mark = ",", digits = 0),
+  imputed_rebate_spend / brand_universe * 100
+))
+cat(sprintf(
+  "  Unmatched:                     $%15s  (%4.1f%% of brand)\n",
+  formatC(unmatched_brand_spend, format = "f", big.mark = ",", digits = 0),
+  unmatched_brand_spend / brand_universe * 100
+))
+
+cat("\n========================================================\n")
+cat("           KNOWN REBATE COVERAGE\n")
+cat("========================================================\n")
+cat(sprintf(
+  "Total known rebate:              $%15s  (%4.1f%% of total)\n",
+  formatC(
+    known_spend + imputed_rebate_spend,
+    format = "f",
+    big.mark = ",",
+    digits = 0
+  ),
+  (known_spend + imputed_rebate_spend) / total_spend * 100
+))
+cat(sprintf(
+  "  Directly observed:             $%15s  (%4.1f%% of total)\n",
+  formatC(known_spend, format = "f", big.mark = ",", digits = 0),
+  known_spend / total_spend * 100
+))
+cat(sprintf(
+  "    of which generic (0%%):       $%15s  (%4.1f%% of total)\n",
+  formatC(generic_spend, format = "f", big.mark = ",", digits = 0),
+  generic_spend / total_spend * 100
+))
+cat(sprintf(
+  "    of which exact match:        $%15s  (%4.1f%% of total)\n",
+  formatC(ndc_text_spend, format = "f", big.mark = ",", digits = 0),
+  ndc_text_spend / total_spend * 100
+))
+cat(sprintf(
+  "  Imputed (class average):       $%15s  (%4.1f%% of total)\n",
+  formatC(imputed_rebate_spend, format = "f", big.mark = ",", digits = 0),
+  imputed_rebate_spend / total_spend * 100
+))
+cat("--------------------------------------------------------\n")
+cat(sprintf(
+  "Unknown (unmatched brands):      $%15s  (%4.1f%% of total)\n",
+  formatC(unmatched_brand_spend, format = "f", big.mark = ",", digits = 0),
+  unmatched_brand_spend / total_spend * 100
+))
+cat(sprintf(
+  "Unidentified (vague MEPS text):  $%15s  (%4.1f%% of total)\n",
+  formatC(unidentified_spend, format = "f", big.mark = ",", digits = 0),
+  unidentified_spend / total_spend * 100
+))
+cat(sprintf(
+  "Devices (excluded):              $%15s  (%4.1f%% of total)\n",
+  formatC(device_spend, format = "f", big.mark = ",", digits = 0),
+  device_spend / total_spend * 100
+))
+cat("========================================================\n")
 
 # ==============================================================================
-# STEP 16: DIAGNOSTIC (THE NEW "MISSING")
+# STEP 15: DIAGNOSTIC - list the missing
 # ==============================================================================
 
 unmatched_brands <- meps_merged[
@@ -901,4 +1173,4 @@ unmatched_brands <- meps_merged[
 cat("\n========================================\n")
 cat(" TOP 15 UNMATCHED BRANDS (The Remaining Gap) \n")
 cat("========================================\n")
-print(head(unmatched_brands, 50))
+print(head(unmatched_brands, 15))
