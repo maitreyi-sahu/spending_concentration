@@ -171,7 +171,20 @@ ssr_ndc_bridge <- merge(
 # Load in MEPS data
 meps <- open_dataset(paste0(data_dir, "raw/meps/USA_MEPS_RX.parquet")) |>
   filter(toc == 'RX' & year_id >= START_YEAR) |>
-  select(year_id, ndc, rxname, tot_pay_amt) |>
+  # KEEP ALL THE SURVEY DESIGN AND DEMOGRAPHIC COLUMNS:
+  select(
+    year_id,
+    claim_id,
+    bene_id,
+    age_group_years_start,
+    sex_id,
+    survey_wt,
+    varpsu,
+    varstr,
+    ndc,
+    rxname,
+    tot_pay_amt
+  ) |>
   as.data.table() |>
   collect() |>
   mutate(year_id = as.integer(year_id))
@@ -1174,3 +1187,33 @@ cat("\n========================================\n")
 cat(" TOP 15 UNMATCHED BRANDS (The Remaining Gap) \n")
 cat("========================================\n")
 print(head(unmatched_brands, 15))
+
+# ==============================================================================
+# STEP 16: SAVE OUTPUT
+# ==============================================================================
+
+# Keep only necessary columns for downstream analysis
+meps_out <- meps_merged[, .(
+  year_id,
+  claim_id,
+  bene_id,
+  age_group_years_start,
+  sex_id,
+  survey_wt,
+  varpsu,
+  varstr,
+  ndc,
+  rxname,
+  final_join_name,
+  final_status,
+  is_device,
+  tot_pay_amt,
+  final_rebate_pct,
+  net_pay_amt,
+  match_tier
+)]
+
+saveRDS(
+  meps_out,
+  paste0(data_dir, "processed/meps_rebate_adjusted/meps_rebate_adjusted.rds")
+)
