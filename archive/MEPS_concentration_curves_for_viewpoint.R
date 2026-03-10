@@ -1,21 +1,10 @@
 # ---------------------------
 # Purpose: Examine inequality in RX spending, compared to other tocs
 #
-#    For Maitreyi's viewpoint
-#
-#
-# Author: Hkl1, 8.19.2025
+# Authors: Hkl1 & msahu
 # ---------------------------
 
-pacman::p_load(
-  data.table,
-  tidyverse,
-  dplyr,
-  openxlsx,
-  arrow,
-  RColorBrewer,
-  ggplot2
-)
+source('init.R')
 
 # --------------------------------
 #   SET ARGS AND DIRECTORY TO SAVE TO
@@ -24,30 +13,53 @@ pacman::p_load(
 use_wgts <- T # use MEPS weights (instead of counts) to make nationally representative
 include_sample_pop <- T # have denominator be anyone in MEPS not just people with at least one encounter (difference between # benes in spend data vs # benes in MEPS are all added on with 0 spend)
 
-save_dir <- "/mnt/share/dex/us_county/05_requests/MEPS_concentration_curves/"
-iso_years <- c(2000, 2022) # update. max value dictates max of the timetrend range plotted
+save_dir <- paste0(dir, "plots/")
+iso_years <- c(2008, 2023) # update. max value dictates max of the timetrend range plotted
 
 # MEPS PATHS
-denoms_path <- "/mnt/share/dex/us_county/00_data_prep/data/MEPS/denom/MEPS_sample_denoms.parquet"
-meps_data_path <- "/mnt/share/dex/us_county/00_data_prep/data/MEPS/stage_3"
+denoms_path <- paste0(data_dir, "raw/meps_denoms/MEPS_sample_denoms.parquet")
+meps_data_path <- paste0(data_dir, "raw/meps/")
+
+# Rebate-Adjusted MEPS RX path
+adjusted_rx_path <- paste0(
+  data_dir,
+  "processed/meps_rebate_adjusted/meps_rebate_adjusted.rds"
+)
 
 # --------------------------------
-#  LOAD SAMPLE DENOMS AND PROCESSED DATA - takes 2.5 minutes to load and process all data
+#  LOAD SAMPLE DENOMS AND PROCESSED DATA
 # --------------------------------
 t0 <- Sys.time()
 
-# Sample denoms
+# 1. Sample denoms
 sample_denoms <- open_dataset(denoms_path) %>% collect() %>% as.data.table()
 sample_denoms <- sample_denoms[,
   .(pop = sum(pop), n_obs = sum(n_obs)),
   by = c('year_id')
 ]
 
-# Load data from data processing
-data <- rbindlist(
-  lapply(list.files(meps_data_path, full.names = T), read_parquet),
-  fill = T
+# 2. Load NON-RX data
+all_raw_files <- list.files(
+  meps_data_path,
+  pattern = "\\.parquet$",
+  full.names = T
 )
+non_rx_files <- all_raw_files[!grepl("USA_MEPS_RX\\.parquet$", all_raw_files)]
+
+data_non_rx <- rbindlist(lapply(non_rx_files, read_parquet), fill = T)
+
+# 3. Load REBATE-ADJUSTED RX data (reading the .rds file)
+data_rx <- readRDS(adjusted_rx_path) %>% as.data.table()
+
+# CRITICAL: Overwrite the gross pay with the net pay for the RX data
+data_rx[, tot_pay_amt := net_pay_amt]
+
+# 4. Combine all types of care
+data <- rbindlist(list(data_non_rx, data_rx), fill = T)
+
+# --------------------------------
+# FILTERING & DETRUNC MIMIC
+# --------------------------------
 
 # Mimic DETRUNC processing and drop rows with missing info
 drop_cols <- c(
@@ -68,8 +80,8 @@ for (j in drop_cols) {
 }
 
 # select just one spend amount per claim
-data <- data[primary_cause == 1 | dx_level == 'dx_1']
-data <- data[year_id >= 2000 & year_id <= max(iso_years)]
+data <- data[primary_cause == 1 | dx_level == 'dx_1'] # note, dental doesn't include dx info
+data <- data[year_id >= min(iso_years) & year_id <= max(iso_years)]
 
 # Drop encounters with unknown payment; keep encounters with known payment that is 0
 data <- data[!is.na(tot_pay_amt)]
@@ -85,7 +97,7 @@ data <- data[, .(
 )]
 
 
-data[toc %in% c('OBGYN', 'OS', 'PAD', 'PC', 'UC'), toc := 'AM']
+data[toc %in% c('OBGYN', 'OB', 'OS', 'PAD', 'PC', 'UC'), toc := 'AM']
 
 
 # --------------------------------
@@ -103,7 +115,6 @@ bene_key <- unique(data[, .(
   survey_wt,
   year_id
 )])
-#bene_key[,.N, by = c('bene_id', 'year_id')][N > 1]
 
 # Aggregate spend by bene (so across encounters) by toc and all-toc
 data_t <- data[,
@@ -248,6 +259,32 @@ paste0(
   round(100 - check$percent_tot_spend, digits = 2),
   "% of total spending"
 )
+
+# Extract the Top 10% share robustly using interpolation
+# This safely handles highly concentrated care where >90% of people have $0 spend
+top10_trend <- closest_percent[,
+  .(
+    top10_share = 100 -
+      approx(x = percentile, y = percent_tot_spend, xout = 90, rule = 2)$y
+  ),
+  by = .(toc, year_id)
+]
+
+# Map the nice names for the plot facets
+top10_trend[,
+  toc_plot := plyr::revalue(
+    toc,
+    c(
+      "AM" = "Ambulatory",
+      "DV" = 'Dental',
+      "all" = "All types combined",
+      'ED' = 'Emergency department',
+      'IP' = 'Inpatient',
+      'HH' = 'Home health',
+      'RX' = 'Retail prescription drugs'
+    )
+  )
+]
 
 #-----------
 # CALCULATE GINI COEFFICIENT
@@ -404,98 +441,141 @@ if (gini_plots == T) {
 # FIGURE - overlap different years of RX gini time trends
 #-----------
 
-# Make sure there is a starting value everywhere for the right shading
+# Make sure there is a starting value everywhere
 plot_lorenz_curve_data <- plot_df[toc == 'RX']
 add_start_val <- unique(plot_lorenz_curve_data[, .(year_id, toc)])
 add_start_val[, `:=`(percent_tot_spend = 0, percentile = 0)]
 plot_lorenz_curve_data <- rbind(plot_lorenz_curve_data, add_start_val)
 
-pdf(
-  paste0(
-    save_dir,
-    "/lorenz_curves_overlay",
-    ifelse(use_wgts, "", "_notweighted_"),
-    ifelse(include_sample_pop, "", "_peoplewithenc"),
-    max(iso_years),
-    ".pdf"
-  ),
-  width = 6,
-  height = 4.5
-) # 8,6
+# 1. PREPARE THE "SHADED GAP" DATA (Interpolated for perfect ribbon matching)
+# Create a sequence of 1000 points from 0 to 100
+ribbon_x <- seq(0, 100, length.out = 1000)
 
+# Interpolate the Y values for the early year (e.g. 2008)
+ribbon_y_early <- approx(
+  x = plot_lorenz_curve_data[year_id == min(iso_years)]$percentile,
+  y = plot_lorenz_curve_data[year_id == min(iso_years)]$percent_tot_spend,
+  xout = ribbon_x,
+  rule = 2 # rule=2 ensures no NAs at the extreme edges
+)$y
 
-# calculate the 90%
-check <- plot_lorenz_curve_data[
-  toc == 'RX' &
-    percentile > 89.9999 &
-    percentile < 90.1 &
-    year_id %in% iso_years
-]
-percent_key <- check[,
-  ten_percent_user_spend := paste0(
-    round(100 - percent_tot_spend, digits = 0),
-    "%"
-  )
-]
-percent_key[, percentile := percentile + 3.5]
-percent_key[, percent_tot_spend_plot := percent_tot_spend - 2]
+# Interpolate the Y values for the late year (e.g. 2023)
+ribbon_y_late <- approx(
+  x = plot_lorenz_curve_data[year_id == max(iso_years)]$percentile,
+  y = plot_lorenz_curve_data[year_id == max(iso_years)]$percent_tot_spend,
+  xout = ribbon_x,
+  rule = 2
+)$y
 
-# Make plot
-plot <- ggplot(
-  plot_lorenz_curve_data[year_id %in% iso_years],
-  aes(x = percentile, y = percent_tot_spend, group = year_id)
-) +
-  #geom_hline(yintercept = 90, color = 'darkgrey')+
-  geom_vline(xintercept = 90, color = 'darkgrey') +
-  geom_line(aes(color = factor(year_id)), size = 1) +
-  geom_abline(intercept = 0, slope = 1, linetype = 3) +
-  #geom_hline(data = percent_key, aes(yintercept = percent_tot_spend, color = factor(year_id)), linetype = 2)+
-  geom_segment(
-    data = percent_key,
-    aes(
-      y = percent_tot_spend,
-      x = 0,
-      xend = 90,
-      yend = percent_tot_spend,
-      color = factor(year_id)
-    ),
-    linetype = 2
-  ) +
-  geom_text(
-    data = percent_key,
-    aes(
-      label = ten_percent_user_spend,
-      color = factor(year_id),
-      y = percent_tot_spend_plot
-    ),
-    show.legend = FALSE
-  ) +
-  scale_color_brewer(palette = 'Set1') +
-  scale_fill_brewer(palette = 'Set1') +
-  geom_ribbon(
-    aes(ymin = percent_tot_spend, ymax = percentile, fill = factor(year_id)),
-    alpha = 0.3
-  ) +
-  labs(
-    x = 'Percent of respondents in the Medical Expenditure Panel Survey [MEPS]',
-    y = "Percent of retail prescription drug spending",
-    title = paste0(
-      "Panel A: Concentration of retail prescription drug \n spending, 2000 versus 2022"
-    ),
-    color = "Year",
-    fill = "Year"
-  ) +
-  theme_bw()
-print(plot)
-
-dev.off()
-
-write.csv(
-  plot_lorenz_curve_data,
-  paste0(save_dir, "/lorenz_curves_overlay_data.csv"),
-  row.names = F
+# Combine into a clean, NA-free dataframe for the ribbon
+ribbon_data <- data.table(
+  percentile = ribbon_x,
+  y_early = ribbon_y_early,
+  y_late = ribbon_y_late
 )
 
+# 2. CALCULATE EXACT 90TH PERCENTILE INTERSECTIONS
+point_90 <- plot_lorenz_curve_data[
+  year_id %in% iso_years,
+  .(
+    y_val = approx(x = percentile, y = percent_tot_spend, xout = 90, rule = 2)$y
+  ),
+  by = year_id
+]
+
+point_90[, top10_share := paste0(sprintf("%.1f", 100 - y_val), "%")]
+point_90[, combined_label := paste0(year_id, ": ", top10_share)]
+
+
+# 3. GENERATE THE PLOT
+pdf(paste0(save_dir, "/lorenz_curves_overlay_gap.pdf"), width = 7, height = 5)
+
+plot <- ggplot() +
+  geom_abline(intercept = 0, slope = 1, linetype = 3, color = "grey50") +
+
+  # THE SHADED GAP (Now using our perfectly interpolated NA-free dataset)
+  geom_ribbon(
+    data = ribbon_data,
+    aes(x = percentile, ymin = y_early, ymax = y_late),
+    fill = "#8B008B",
+    alpha = 0.12
+  ) +
+
+  geom_line(
+    data = plot_lorenz_curve_data[year_id %in% iso_years],
+    aes(
+      x = percentile,
+      y = percent_tot_spend,
+      color = factor(year_id),
+      group = year_id
+    ),
+    size = 1.2
+  ) +
+
+  geom_vline(xintercept = 90, color = "grey70", linetype = 1) +
+
+  geom_segment(
+    data = point_90,
+    aes(x = 0, xend = 90, y = y_val, yend = y_val, color = factor(year_id)),
+    linetype = 2,
+    alpha = 0.7,
+    size = 0.6
+  ) +
+
+  geom_text(
+    data = point_90,
+    aes(x = 70, y = y_val, label = combined_label, color = factor(year_id)),
+    vjust = -0.5,
+    hjust = 0.5,
+    fontface = "bold",
+    size = 5,
+    show.legend = FALSE
+  ) +
+
+  annotate(
+    "text",
+    x = 5,
+    y = 95,
+    label = paste0(
+      "The top 10% of highest-cost patients accounted for\n",
+      point_90[year_id == min(iso_years), top10_share],
+      " of net spending in ",
+      min(iso_years),
+      ", growing to ",
+      point_90[year_id == max(iso_years), top10_share],
+      " in ",
+      max(iso_years),
+      "."
+    ),
+    hjust = 0,
+    vjust = 1,
+    size = 4.5,
+    fontface = "italic",
+    color = "grey30"
+  ) +
+
+  scale_color_manual(values = c("#377EB8", "#E41A1C")) +
+
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 12),
+    panel.grid.major = element_line(color = "grey90", size = 0.3)
+  ) +
+
+  scale_x_continuous(breaks = seq(0, 100, by = 10), expand = c(0.01, 0)) +
+  scale_y_continuous(breaks = seq(0, 100, by = 10), expand = c(0.01, 0)) +
+
+  coord_cartesian(xlim = c(0, 100), ylim = c(0, 100), clip = "off") +
+
+  labs(
+    x = 'Cumulative percentage of US population',
+    y = "Cumulative percentage of net retail prescription drug spending" #,
+    #    title = "Figure 1: Increasing Concentration of Retail Prescription Drug Spending"
+  )
+
+print(plot)
+dev.off()
 
 #-----------
 # FIGURE - time trends of gini coefficients for different types of care
@@ -546,7 +626,7 @@ plot <- ggplot(
   aes(x = year_id, y = gini, color = toc_plot, fill = toc_plot)
 ) +
   facet_wrap(~toc_plot, nrow = 2) +
-  ylim(0.5, 1) +
+  ylim(0.7, 1) +
   geom_point() +
   geom_smooth(method = 'lm', se = F) +
   theme_bw() +
@@ -558,7 +638,7 @@ plot <- ggplot(
     x = 'Year',
     y = 'Gini coefficient',
     title = paste0(
-      'Panel B: Inequality index for health care spending over time \n by type of care, 2000 to 2022'
+      'Inequality index for health care spending over time \n by type of care, 2000 to 2022'
     ),
     color = '',
     fill = ''
@@ -571,3 +651,106 @@ write.csv(
   paste0(save_dir, "/gini_coef_timetrend_data.csv"),
   row.names = F
 )
+
+#-----------
+# FIGURE - presented as top 10% share
+#-----------
+
+pdf(paste0(pdf_name, "_top10.pdf"), width = 6, height = 4.5)
+plot <- ggplot(
+  top10_trend[toc != 'all'],
+  aes(x = year_id, y = top10_share, color = toc_plot, fill = toc_plot)
+) +
+  facet_wrap(~toc_plot, nrow = 2) +
+  ylim(50, 100) + # Sets Y-axis from 50% to 100%
+  geom_point() +
+  geom_smooth(method = 'lm', se = F) +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  scale_color_manual(values = base_colors2) +
+  scale_fill_manual(values = base_colors2) +
+  labs(
+    x = 'Year',
+    y = 'Share of spending by top 10% of patients (%)',
+    title = 'Panel B: Spending by the top 10% of patients over time \n by type of care, 2008 to 2022',
+    color = '',
+    fill = ''
+  )
+print(plot)
+dev.off()
+
+#-----------
+# SINGLE PANEL FIGURE - presented as top 10% share
+#-----------
+
+library(ggrepel)
+
+# 1. Prep data (Do not change the strings in the data table!)
+single_plot_data <- single_plot_data[toc_plot != "Home health"]
+max_yr <- max(single_plot_data$year_id)
+label_data <- single_plot_data[year_id == max_yr]
+
+# 2. Plot
+pdf(paste0(pdf_name, "_single_panel_clean.pdf"), width = 8, height = 5)
+
+plot <- ggplot(
+  single_plot_data,
+  aes(x = year_id, y = top10_share, color = toc_plot, group = toc_plot)
+) +
+  geom_point(aes(alpha = is_rx, size = is_rx)) +
+  geom_smooth(method = 'lm', se = FALSE, aes(size = is_rx)) +
+
+  # Add the labels
+  geom_text_repel(
+    data = label_data,
+    # FIX: Change the label text directly in the aes() mapping!
+    aes(
+      x = max_yr,
+      y = top10_share,
+      label = ifelse(
+        toc_plot == "Retail prescription drugs",
+        "Retail prescription\ndrugs",
+        as.character(toc_plot)
+      )
+    ),
+    nudge_x = 1.5,
+    direction = "y",
+    hjust = 0,
+    segment.size = 0.4,
+    segment.color = "grey80",
+    size = 4.5,
+    # Keep this looking for the original string name
+    fontface = ifelse(
+      label_data$toc_plot == "Retail prescription drugs",
+      "bold",
+      "plain"
+    )
+  ) +
+
+  scale_color_manual(values = highlight_colors) +
+  scale_alpha_manual(values = c("Yes" = 1, "No" = 0.7), guide = "none") +
+  scale_size_manual(values = c("Yes" = 1, "No" = 0.8), guide = "none") +
+
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 12),
+    plot.margin = margin(10, 20, 10, 10)
+  ) +
+
+  scale_x_continuous(
+    breaks = c(2008, 2013, 2018, 2023),
+    limits = c(2008, 2028)
+  ) +
+
+  # FIX: Put clip = "off" back in so nothing ever gets chopped!
+  coord_cartesian(ylim = c(60, 100), clip = "off") +
+
+  labs(
+    x = 'Year',
+    y = 'Share of spending by top 10% of patients (%)',
+    title = 'Figure 1: Share of spending accounted for by the top 10% of patients\nby type of care, 2008 to 2023'
+  )
+
+print(plot)
+dev.off()

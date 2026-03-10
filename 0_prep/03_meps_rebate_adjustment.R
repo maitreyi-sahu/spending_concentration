@@ -171,13 +171,19 @@ ssr_ndc_bridge <- merge(
 # Load in MEPS data
 meps <- open_dataset(paste0(data_dir, "raw/meps/USA_MEPS_RX.parquet")) |>
   filter(toc == 'RX' & year_id >= START_YEAR) |>
-  # KEEP ALL THE SURVEY DESIGN AND DEMOGRAPHIC COLUMNS:
+  # KEEP ALL DEMOGRAPHICS, DIAGNOSIS FLAGS, AND SURVEY WEIGHTS:
   select(
     year_id,
     claim_id,
     bene_id,
     age_group_years_start,
+    age_group_id,
     sex_id,
+    pri_payer,
+    code_system,
+    dx_level,
+    dx,
+    toc,
     survey_wt,
     varpsu,
     varstr,
@@ -1198,7 +1204,13 @@ meps_out <- meps_merged[, .(
   claim_id,
   bene_id,
   age_group_years_start,
+  age_group_id,
   sex_id,
+  pri_payer,
+  code_system,
+  dx_level,
+  dx,
+  toc,
   survey_wt,
   varpsu,
   varstr,
