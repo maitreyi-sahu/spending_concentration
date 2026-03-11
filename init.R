@@ -39,6 +39,7 @@ pacman::p_load(
   stringr,
   stringdist,
   ggplot2,
+  ggrepel,
   RColorBrewer,
   gridExtra,
   zoo

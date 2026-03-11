@@ -96,10 +96,6 @@ data <- data[, .(
   survey_wt
 )]
 
-
-data[toc %in% c('OBGYN', 'OB', 'OS', 'PAD', 'PC', 'UC'), toc := 'AM']
-
-
 # --------------------------------
 #  CLEAN DATA AND CALCULATE PERCENTILES AND CUMSUM FOR EVERY ROW
 # --------------------------------
@@ -537,7 +533,7 @@ plot <- ggplot() +
     x = 5,
     y = 95,
     label = paste0(
-      "The top 10% of highest-cost patients accounted for\n",
+      "The top 10% of highest-spending patients accounted for\n",
       point_90[year_id == min(iso_years), top10_share],
       " of net spending in ",
       min(iso_years),
@@ -683,7 +679,18 @@ dev.off()
 # SINGLE PANEL FIGURE - presented as top 10% share
 #-----------
 
-library(ggrepel)
+# 0. INITIALIZE THE DATA & COLORS
+single_plot_data <- copy(top10_trend[toc != 'all'])
+single_plot_data[, is_rx := ifelse(toc == 'RX', "Yes", "No")]
+
+grey_color = 'grey80'
+highlight_colors <- c(
+  "Retail prescription drugs" = "#00008B", # Deep Dark Blue
+  "Ambulatory" = grey_color, # Medium Grey
+  "Dental" = grey_color,
+  "Emergency department" = grey_color,
+  "Inpatient" = grey_color
+)
 
 # 1. Prep data (Do not change the strings in the data table!)
 single_plot_data <- single_plot_data[toc_plot != "Home health"]
