@@ -483,6 +483,10 @@ message("\n=== ALL SCENARIOS COMPLETE ===")
 total_rx_obs <- nrow(data_rx_base[
   year_id >= min(iso_years) & year_id <= max(iso_years)
 ])
+total_respondents <- sum(sample_denoms[
+  year_id >= min(iso_years) & year_id <= max(iso_years),
+  n_obs
+])
 
 # 2. Top 10% RX start/end
 rx_top10_start <- top10_trend_main[
