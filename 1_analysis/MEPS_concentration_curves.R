@@ -51,23 +51,32 @@ print("Base Data loaded!")
 print(Sys.time() - t0)
 
 # --------------------------------
-# SETUP THE 3 SCENARIOS
+# SETUP THE 4 SCENARIOS
 # --------------------------------
 
 scenarios <- list(
   list(
     name = "gross_spending",
     rx_col = "gross_pay_amt",
+    non_rx_col = "oop_pay_amt",
     title_suffix = "Gross unadjusted spending"
+  ),
+  list(
+    name = "oop_gross_spending",
+    rx_col = "oop_pay_amt",
+    non_rx_col = "gross_pay_amt",
+    title_suffix = "Gross out-of-pocket spending"
   ),
   list(
     name = "net_spending_main",
     rx_col = "net_pay_amt_total",
-    title_suffix = "Net spending" # (For the trend line plot)
+    non_rx_col = "gross_pay_amt",
+    title_suffix = "Net spending"
   ),
   list(
     name = "net_spending_mdcd_split",
     rx_col = "net_pay_amt_split",
+    non_rx_col = "gross_pay_amt",
     title_suffix = "Net spending - Medicaid split"
   )
 )
@@ -85,6 +94,19 @@ for (scenario in scenarios) {
   # 1. Prepare Data for this scenario
   data_rx <- copy(data_rx_base)
   data_rx[, tot_pay_amt := get(scenario$rx_col)]
+
+  # Copy non-rx data and assign the correct comparison column
+  data_non_rx_temp <- copy(data_non_rx)
+
+  # Check if the column exists in non_rx data before assigning
+  if (scenario$non_rx_col %in% names(data_non_rx_temp)) {
+    data_non_rx_temp[, tot_pay_amt := get(scenario$non_rx_col)]
+  } else {
+    warning(paste("Column", scenario$non_rx_col, "not found in data_non_rx!"))
+  }
+
+  # Now bind them together
+  data <- rbindlist(list(data_non_rx_temp, data_rx), fill = T)
 
   data <- rbindlist(list(data_non_rx, data_rx), fill = T)
 
@@ -243,7 +265,7 @@ for (scenario in scenarios) {
   # ==========================================================
   # PLOT: LORENZ CURVES
   # ==========================================================
-  library(tidyr)
+
   plot_lorenz_curve_data <- plot_df[toc == 'RX']
   add_start_val <- unique(plot_lorenz_curve_data[, .(year_id, toc)])
   add_start_val[, `:=`(percent_tot_spend = 0, percentile = 0)]

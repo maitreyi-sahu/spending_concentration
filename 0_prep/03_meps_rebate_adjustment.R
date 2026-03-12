@@ -199,6 +199,7 @@ meps <- open_dataset(paste0(data_dir, "raw/meps/USA_MEPS_RX.parquet")) |>
     ndc,
     rxname,
     tot_pay_amt,
+    oop_pay_amt,
     mdcd_pay_amt
   ) |>
   as.data.table() |>
@@ -1177,6 +1178,7 @@ meps_out <- meps_merged[, .(
   final_status,
   is_device,
   tot_pay_amt,
+  oop_pay_amt,
   gross_pay_amt,
   net_pay_amt_total,
   net_pay_amt_split,
