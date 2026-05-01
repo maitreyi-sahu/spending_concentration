@@ -14,7 +14,8 @@ use_wgts <- T
 include_sample_pop <- T
 
 save_dir_base <- paste0(dir, "plots/")
-iso_years <- c(2008, 2023)
+year_range <- c(START_YEAR, END_YEAR)
+iso_years <- c(2008, 2023) # Lorenz comparison years (must exist in both gross & net data)
 
 # MEPS PATHS
 denoms_path <- paste0(data_dir, "raw/meps_denoms/MEPS_sample_denoms.parquet")
@@ -43,8 +44,11 @@ all_raw_files <- list.files(
   full.names = T
 )
 non_rx_files <- all_raw_files[!grepl("USA_MEPS_RX\\.parquet$", all_raw_files)]
-data_non_rx <- rbindlist(lapply(non_rx_files, read_parquet), fill = T)
+rx_file <- all_raw_files[grepl("USA_MEPS_RX\\.parquet$", all_raw_files)]
 
+data_non_rx <- rbindlist(lapply(non_rx_files, read_parquet), fill = T)
+data_rx_raw <- read_parquet(rx_file) %>% as.data.table()
+setnames(data_rx_raw, "tot_pay_amt", "gross_pay_amt")
 data_rx_base <- readRDS(adjusted_rx_path) %>% as.data.table()
 
 print("Base Data loaded!")
@@ -59,25 +63,33 @@ scenarios <- list(
     name = "gross_spending",
     rx_col = "gross_pay_amt",
     non_rx_col = "oop_pay_amt",
-    title_suffix = "Gross unadjusted spending"
+    title_suffix = "Gross unadjusted spending",
+    start_year = START_YEAR,
+    use_rebate_adjusted = FALSE
   ),
   list(
     name = "oop_gross_spending",
     rx_col = "oop_pay_amt",
     non_rx_col = "gross_pay_amt",
-    title_suffix = "Gross out-of-pocket spending"
+    title_suffix = "Gross out-of-pocket spending",
+    start_year = START_YEAR,
+    use_rebate_adjusted = FALSE
   ),
   list(
     name = "net_spending_main",
     rx_col = "net_pay_amt_total",
     non_rx_col = "gross_pay_amt",
-    title_suffix = "Net spending"
+    title_suffix = "Net spending",
+    start_year = 2008,
+    use_rebate_adjusted = TRUE
   ),
   list(
     name = "net_spending_mdcd_split",
     rx_col = "net_pay_amt_split",
     non_rx_col = "gross_pay_amt",
-    title_suffix = "Net spending - Medicaid split"
+    title_suffix = "Net spending - Medicaid split",
+    start_year = 2008,
+    use_rebate_adjusted = TRUE
   )
 )
 
@@ -92,7 +104,12 @@ for (scenario in scenarios) {
   }
 
   # 1. Prepare Data for this scenario
-  data_rx <- copy(data_rx_base)
+  # Pick the right RX dataset based on whether this scenario needs rebate adjustment
+  if (scenario$use_rebate_adjusted) {
+    data_rx <- copy(data_rx_base)
+  } else {
+    data_rx <- copy(data_rx_raw)
+  }
   data_rx[, tot_pay_amt := get(scenario$rx_col)]
 
   # Copy non-rx data and assign the correct comparison column
@@ -107,8 +124,6 @@ for (scenario in scenarios) {
 
   # Now bind them together
   data <- rbindlist(list(data_non_rx_temp, data_rx), fill = T)
-
-  data <- rbindlist(list(data_non_rx, data_rx), fill = T)
 
   # 2. Filtering & Detrunc Mimic
   drop_cols <- c(
@@ -128,7 +143,7 @@ for (scenario in scenarios) {
   }
 
   data <- data[primary_cause == 1 | dx_level == 'dx_1' | toc == 'DV']
-  data <- data[year_id >= min(iso_years) & year_id <= max(iso_years)]
+  data <- data[year_id >= scenario$start_year & year_id <= max(year_range)]
   data <- data[!is.na(tot_pay_amt)]
 
   data <- data[, .(
@@ -260,6 +275,9 @@ for (scenario in scenarios) {
   if (scenario$name == "net_spending_main") {
     top10_trend_main <- copy(top10_trend)
     closest_percent_main <- copy(closest_percent)
+  }
+  if (scenario$name == "gross_spending") {
+    top10_trend_gross <- copy(top10_trend)
   }
 
   # ==========================================================
@@ -458,15 +476,19 @@ for (scenario in scenarios) {
       plot.margin = margin(10, 20, 10, 10)
     ) +
     scale_x_continuous(
-      breaks = c(2008, 2013, 2018, 2023),
-      limits = c(2008, 2028)
+      breaks = seq(scenario$start_year, max(year_range), by = 5),
+      limits = c(scenario$start_year, max(year_range) + 5)
     ) +
     coord_cartesian(ylim = c(60, 100), clip = "off") +
     labs(
       x = 'Year',
       y = 'Share of spending by top 10% of patients (%)',
-      title = paste(
-        "Share of spending accounted for by the top 10% of patients\nby type of care, 2008 to 2023",
+      title = paste0(
+        "Share of spending accounted for by the top 10% of patients\nby type of care, ",
+        scenario$start_year,
+        " to ",
+        max(year_range),
+        " — ",
         scenario$title_suffix
       )
     )
@@ -476,12 +498,133 @@ for (scenario in scenarios) {
 message("\n=== ALL SCENARIOS COMPLETE ===")
 
 # ==========================================================
+# OVERLAY PLOT: GROSS VS NET TOP-10% SHARE BY TOC
+# ==========================================================
+library(ggrepel)
+
+top10_trend_gross[, spending_type := "Gross"]
+top10_trend_main[, spending_type := "Net"]
+overlay_data <- rbind(top10_trend_gross, top10_trend_main)
+overlay_data <- overlay_data[toc != "all" & toc_plot != "Home health"]
+
+# For non-RX tocs, gross and net are identical (same non_rx_col across scenarios),
+# so drop the duplicates to avoid plotting them twice
+overlay_data <- overlay_data[
+  toc == "RX" | spending_type == "Gross"
+]
+# Relabel non-RX rows so they don't carry a spending_type distinction
+overlay_data[toc != "RX", spending_type := "Other"]
+
+# Build a single grouping variable for color/linetype mapping
+overlay_data[,
+  series := fcase(
+    toc == "RX" & spending_type == "Gross" , "RX (Gross)" ,
+    toc == "RX" & spending_type == "Net"   , "RX (Net)"   ,
+    default = as.character(toc_plot)
+  )
+]
+
+grey_color <- "grey80"
+series_colors <- c(
+  "RX (Gross)" = "#00008B",
+  "RX (Net)" = "#2CA02C",
+  "Ambulatory" = grey_color,
+  "Dental" = grey_color,
+  "Emergency department" = grey_color,
+  "Inpatient" = grey_color
+)
+series_linetypes <- c(
+  "RX (Gross)" = "solid",
+  "RX (Net)" = "dashed",
+  "Ambulatory" = "solid",
+  "Dental" = "solid",
+  "Emergency department" = "solid",
+  "Inpatient" = "solid"
+)
+series_sizes <- c(
+  "RX (Gross)" = 1,
+  "RX (Net)" = 1,
+  "Ambulatory" = 0.8,
+  "Dental" = 0.8,
+  "Emergency department" = 0.8,
+  "Inpatient" = 0.8
+)
+
+max_yr <- max(overlay_data$year_id)
+label_data <- overlay_data[year_id == max_yr]
+label_data[,
+  label := fcase(
+    series == "RX (Gross)" , "Retail prescription\ndrugs (gross)" ,
+    series == "RX (Net)"   , "Retail prescription\ndrugs (net)"   ,
+    default = as.character(series)
+  )
+]
+
+pdf(paste0(plot_dir, "single_panel_gross_vs_net.pdf"), width = 8, height = 5)
+p_overlay <- ggplot(
+  overlay_data,
+  aes(
+    x = year_id,
+    y = top10_share,
+    color = series,
+    linetype = series,
+    group = series
+  )
+) +
+  geom_point(aes(size = series), alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, aes(size = series)) +
+  geom_text_repel(
+    data = label_data,
+    aes(x = max_yr, y = top10_share, label = label, color = series),
+    nudge_x = 1.5,
+    direction = "y",
+    hjust = 0,
+    segment.size = 0.4,
+    segment.color = "grey80",
+    size = 4.5,
+    fontface = ifelse(grepl("^RX", label_data$series), "bold", "plain"),
+    inherit.aes = FALSE
+  ) +
+  scale_color_manual(values = series_colors) +
+  scale_linetype_manual(values = series_linetypes) +
+  scale_size_manual(values = series_sizes, guide = "none") +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 12),
+    plot.margin = margin(10, 20, 10, 10)
+  ) +
+  scale_x_continuous(
+    breaks = seq(START_YEAR, END_YEAR, by = 5),
+    limits = c(START_YEAR, END_YEAR + 5)
+  ) +
+  coord_cartesian(ylim = c(60, 100), clip = "off") +
+  labs(
+    x = "Year",
+    y = "Share of spending by top 10% of patients (%)",
+    title = paste0(
+      "Share of spending accounted for by the top 10% of patients\n",
+      "by type of care, ",
+      START_YEAR,
+      " to ",
+      END_YEAR,
+      " — gross vs net of rebates"
+    )
+  )
+print(p_overlay)
+dev.off()
+
+
+# ==========================================================
 # NUMBER PLUGGING FOR MANUSCRIPT
 # ==========================================================
 
-# 1. Total RX observations (Rows loaded from MEPS)
-total_rx_obs <- nrow(data_rx_base[
-  year_id >= min(iso_years) & year_id <= max(iso_years)
+# 1. Total RX observations (Rows loaded from MEPS, full gross analysis window)
+gross_scenario <- scenarios[[which(sapply(scenarios, function(s) {
+  s$name == "gross_spending"
+}))]]
+total_rx_obs <- nrow(data_rx_raw[
+  year_id >= gross_scenario$start_year & year_id <= max(year_range)
 ])
 total_respondents <- sum(sample_denoms[
   year_id >= min(iso_years) & year_id <= max(iso_years),
@@ -542,11 +685,12 @@ cat(
   "========================================================================\n\n"
 )
 cat(sprintf(
-  "Among %s prescription drug observations in MEPS (%s–%s), we assigned gross-to-net statuses to 97.9%% of identified branded drug expenditures [eTable 1]. Retail pharmaceutical spending became increasingly concentrated over the 16-year period; this pattern persisted after adjusting for rebates and other discounts[Figure 1; eFigure 2]. In %s, the top 10%% of patients accounted for %.1f%% of net retail prescription drug spending; by %s, this decile accounted for %.1f%%, a %.1f-percentage-point increase [Figure 2]. Over the same period, the bottom 50%% of patients accounted for less than %.1f%% of spending. By contrast, concentration remained highly stable for acute inpatient and emergency care (consistently between %.0f-%.0f%%) and dental care (%.0f-%.0f%%). While ambulatory care concentration increased modestly from %.1f%% to %.1f%% (a %.1f-percentage-point increase), prescription drugs were the only sector to exhibit a compounding shift toward a catastrophic financial distribution [Figure 1].\n\n",
+  "Among %s prescription drug observations in MEPS (%s–%s), we assigned gross-to-net statuses to 97.9%% of identified branded drug expenditures [eTable 1]. Retail pharmaceutical spending became increasingly concentrated over the %d-year period; this pattern persisted after adjusting for rebates and other discounts[Figure 1; eFigure 2]. In %s, the top 10%% of patients accounted for %.1f%% of net retail prescription drug spending; by %s, this decile accounted for %.1f%%, a %.1f-percentage-point increase [Figure 2]. Over the same period, the bottom 50%% of patients accounted for less than %.1f%% of spending. By contrast, concentration remained highly stable for acute inpatient and emergency care (consistently between %.0f-%.0f%%) and dental care (%.0f-%.0f%%). While ambulatory care concentration increased modestly from %.1f%% to %.1f%% (a %.1f-percentage-point increase), prescription drugs were the only sector to exhibit a compounding shift toward a catastrophic financial distribution [Figure 1].\n\n",
   formatC(total_rx_obs, format = "d", big.mark = ","),
   min(iso_years),
   max(iso_years),
   min(iso_years),
+  max(iso_years) - min(iso_years),
   rx_top10_start,
   max(iso_years),
   rx_top10_end,
